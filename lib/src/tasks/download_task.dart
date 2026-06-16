@@ -228,6 +228,12 @@ final class DownloadTask {
           'Download succeeded but remote record not found for "${reference.path}"');
     }
 
+    if (bytesWritten != record.sizeBytes) {
+      throw Exception(
+          'Download size mismatch for "${reference.path}" '
+          '(expected ${record.sizeBytes} B, wrote $bytesWritten B)');
+    }
+
     _setProgress(1.0);
     _setStatus(DownloadTaskStatus.complete);
     _completeTask();
@@ -280,12 +286,13 @@ final class DownloadTask {
 
   Future<void> _handleFailure(Object e, StackTrace st) async {
     _setStatus(DownloadTaskStatus.failed);
+    // Remove the corrupt partial before reporting failure, so callers awaiting
+    // whenDone never observe a leftover file.
+    await _deletePartialFile();
     if (!_taskCompleter.isCompleted) {
       _taskCompleter.completeError(e, st);
     }
     _closeStreams();
-
-    await _deletePartialFile();
   }
 
   /// Best-effort deletion of the partially written destination file. No-op when

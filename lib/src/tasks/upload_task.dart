@@ -155,6 +155,10 @@ final class UploadTask {
         sizeBytes = (await localFile.stat()).size;
       }
 
+      // Files at or below the threshold go through the backend's single-shot
+      // upload (`:upload`); larger files are split into multipart parts.
+      final isMultipart = sizeBytes > multipartThreshold;
+
       var byteOffset = 0;
       var partNumber = 1;
 
@@ -164,43 +168,63 @@ final class UploadTask {
         existingRecord = await reference.api
             .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
       } else {
-        if (existingRecord.sizeBytes != sizeBytes) {
-          throw Exception('Remote file already exists with a different size '
-              '(remote: ${existingRecord.sizeBytes} B, local: $sizeBytes B)');
-        }
-        if (existingRecord.mimeType != mimeType) {
-          throw Exception(
-              'Remote file already exists with a different MIME type '
-              '(remote: ${existingRecord.mimeType}, local: $mimeType)');
-        }
-        if (existingRecord.uploadStatus == UploadStatus.complete) {
-          _setProgress(1.0);
-          _setStatus(UploadTaskStatus.complete);
-          _completeTask(existingRecord);
-          return;
-        }
+        // A record matches the upload when both its declared size and MIME type
+        // are identical — only then can it be safely skipped or resumed.
+        final matches = existingRecord.sizeBytes == sizeBytes &&
+            existingRecord.mimeType == mimeType;
 
-        final parts = await reference.api.listParts(reference.path);
-        if (parts.isNotEmpty) {
-          byteOffset = parts.map((p) => p.size ?? 0).reduce((a, b) => a + b);
-          partNumber = parts.length + 1;
+        if (existingRecord.uploadStatus == UploadStatus.complete) {
+          if (matches) {
+            // Already uploaded identical content — nothing to do.
+            _setProgress(1.0);
+            _setStatus(UploadTaskStatus.complete);
+            _completeTask(existingRecord);
+            return;
+          }
+          // Overwrite the completed file with the new content.
+          existingRecord = await _replaceRecord(sizeBytes);
+        } else if (matches) {
+          // Resume the in-progress upload of the same content. Single-shot
+          // uploads can't be resumed mid-transfer, so only multipart consults
+          // the already-completed parts.
+          if (isMultipart) {
+            final parts = await reference.api.listParts(reference.path);
+            if (parts.isNotEmpty) {
+              byteOffset =
+                  parts.map((p) => p.size ?? 0).reduce((a, b) => a + b);
+              partNumber = parts.length + 1;
+            }
+          }
+        } else {
+          // An abandoned attempt for different content — discard it and start
+          // fresh so a prior failure doesn't poison this path.
+          existingRecord = await _replaceRecord(sizeBytes);
         }
       }
 
-      if (byteOffset > 0) _setProgress(byteOffset / sizeBytes);
+      if (isMultipart) {
+        if (byteOffset > 0) _setProgress(byteOffset / sizeBytes);
 
-      while (byteOffset < sizeBytes) {
-        final chunkSize = (sizeBytes - byteOffset).clamp(0, multipartThreshold);
-        await _uploadPartWithRetry(
+        while (byteOffset < sizeBytes) {
+          final chunkSize =
+              (sizeBytes - byteOffset).clamp(0, multipartThreshold);
+          await _uploadPartWithRetry(
+            localFile: localFile,
+            bytes: bytes,
+            partNumber: partNumber,
+            byteOffset: byteOffset,
+            chunkSize: chunkSize,
+            sizeBytes: sizeBytes,
+          );
+          byteOffset += chunkSize;
+          partNumber++;
+        }
+      } else {
+        await _uploadWholeWithRetry(
           localFile: localFile,
           bytes: bytes,
-          partNumber: partNumber,
-          byteOffset: byteOffset,
-          chunkSize: chunkSize,
           sizeBytes: sizeBytes,
         );
-        byteOffset += chunkSize;
-        partNumber++;
       }
 
       final confirmed = await reference.api.confirmUpload(reference.path);
@@ -213,6 +237,63 @@ final class UploadTask {
       await _handleFailure(e, st);
     } catch (e, st) {
       await _handleFailure(e, st);
+    }
+  }
+
+  /// Deletes any existing record/parts at the path and creates a fresh one for
+  /// the given [sizeBytes]. Used to overwrite a completed file or to discard an
+  /// abandoned attempt whose content no longer matches.
+  Future<FileData> _replaceRecord(int sizeBytes) async {
+    await reference.api.deleteFile(reference.path);
+    return reference.api
+        .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
+  }
+
+  /// Uploads the whole file/bytes in a single signed PUT (the `:upload` path),
+  /// retrying with exponential backoff. Used for files at or below the
+  /// multipart threshold, including empty files.
+  Future<void> _uploadWholeWithRetry({
+    required File? localFile,
+    required Uint8List? bytes,
+    required int sizeBytes,
+  }) async {
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final session =
+            await reference.api.generateFileUploadUrl(reference.path);
+        final Stream<List<int>> body =
+            bytes != null ? Stream.value(bytes) : localFile!.openRead();
+
+        final response = await _httpClient.put<void>(
+          session.url,
+          data: body,
+          options: Options(
+            contentType: mimeType,
+            headers: {
+              'Content-Length': sizeBytes.toString(),
+            },
+          ),
+          cancelToken: _cancelToken,
+          onSendProgress: (sent, _) {
+            if (sizeBytes > 0) _setProgress(sent / sizeBytes);
+          },
+        );
+
+        final code = response.statusCode;
+        if (code != 200 && code != 201) {
+          throw Exception('Failed to upload file: HTTP $code');
+        }
+        return;
+      } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel) rethrow;
+
+        final isLastAttempt = attempt == maxRetries;
+        if (isLastAttempt) rethrow;
+
+        final delay = retryBaseDelay * (1 << attempt);
+        await Future<void>.delayed(delay);
+        if (!_isRunning) return;
+      }
     }
   }
 

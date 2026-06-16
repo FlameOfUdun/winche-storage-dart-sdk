@@ -97,6 +97,20 @@ task.stateStream.listen((UploadTaskState state) {
 final FileSnapshot? snapshot = await task.whenDone; // null if cancelled
 ```
 
+Uploading to a path that already has a file:
+
+- **Completed file, identical size + MIME** — skipped; the existing record is
+  returned without re-uploading.
+- **Completed file, different size or MIME** — replaced (the old object is
+  deleted and the new content uploaded).
+- **Interrupted upload, identical size + MIME** — resumed from the last
+  completed part.
+- **Interrupted upload, different size or MIME** — discarded and re-uploaded
+  from scratch (so a previously failed attempt never blocks the path).
+
+Files at or below `multipartThreshold` upload in a single request; larger files
+are uploaded in parts.
+
 ### Download
 
 ```dart
