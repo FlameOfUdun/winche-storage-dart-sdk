@@ -30,15 +30,13 @@ final class DownloadTaskState {
 
 final class DownloadTask {
   final ChildReference reference;
-  final String? _explicitSaveTo;
-  final Future<String> Function()? _directoryResolver;
-  final String? _extension;
+
+  /// Absolute destination path the file is written to.
+  final String saveTo;
+
   final int maxRetries;
   final Duration retryBaseDelay;
   final Dio _httpClient;
-
-  /// The resolved destination path, computed once on first use.
-  String? _resolvedSaveTo;
 
   final _stateController = StreamController<DownloadTaskState>.broadcast();
   final _taskCompleter = Completer<void>();
@@ -52,22 +50,15 @@ final class DownloadTask {
 
   DownloadTask._({
     required this.reference,
-    required String? saveTo,
-    required Future<String> Function()? directoryResolver,
-    required String? extension,
+    required this.saveTo,
     required this.maxRetries,
     required this.retryBaseDelay,
     required Dio httpClient,
-  })  : _explicitSaveTo = saveTo,
-        _directoryResolver = directoryResolver,
-        _extension = extension,
-        _httpClient = httpClient;
+  }) : _httpClient = httpClient;
 
   factory DownloadTask.start({
     required ChildReference reference,
-    String? saveTo,
-    Future<String> Function()? directoryResolver,
-    String? extension,
+    required String saveTo,
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
@@ -78,8 +69,6 @@ final class DownloadTask {
     final task = DownloadTask._(
       reference: reference,
       saveTo: saveTo,
-      directoryResolver: directoryResolver,
-      extension: extension,
       maxRetries: maxRetries,
       retryBaseDelay: retryBaseDelay,
       httpClient: client,
@@ -87,36 +76,6 @@ final class DownloadTask {
 
     unawaited(task._run());
     return task;
-  }
-
-  /// Resolves the destination path (once). Uses the explicit `saveTo` when
-  /// given, otherwise `<directoryResolver()>/reference.path`, applying the
-  /// optional extension override. Throws [StateError] when neither is available.
-  Future<String> _resolveSaveTo() async {
-    final cached = _resolvedSaveTo;
-    if (cached != null) return cached;
-    final base = _explicitSaveTo ??
-        (_directoryResolver != null
-            ? '${await _directoryResolver!()}/${reference.path}'
-            : throw StateError(
-                'saveTo is required when no directoryResolver is configured.'));
-    final finalPath =
-        _extension != null ? _withExtension(base, _extension!) : base;
-    return _resolvedSaveTo = finalPath;
-  }
-
-  /// Replaces or appends [ext] (with or without leading dot) on [filePath].
-  static String _withExtension(String filePath, String ext) {
-    final normalized = ext.startsWith('.') ? ext : '.$ext';
-    final sepIndex = filePath.lastIndexOf('/');
-    final fileName = filePath.substring(sepIndex + 1);
-    final dotIndex = fileName.lastIndexOf('.');
-    if (dotIndex >= 0) {
-      return filePath.substring(
-              0, filePath.length - (fileName.length - dotIndex)) +
-          normalized;
-    }
-    return filePath + normalized;
   }
 
   Future<void> _run({bool isResume = false}) async {
@@ -149,7 +108,6 @@ final class DownloadTask {
   }
 
   Future<void> _attempt({bool isResume = false}) async {
-    final saveTo = await _resolveSaveTo();
     final session = await reference.api.generateDownloadUrl(reference.path);
     final file = File(saveTo);
 
@@ -295,13 +253,10 @@ final class DownloadTask {
     _closeStreams();
   }
 
-  /// Best-effort deletion of the partially written destination file. No-op when
-  /// the path hasn't been resolved yet (nothing was written).
+  /// Best-effort deletion of the partially written destination file.
   Future<void> _deletePartialFile() async {
-    final path = _resolvedSaveTo;
-    if (path == null) return;
     try {
-      final file = File(path);
+      final file = File(saveTo);
       if (await file.exists()) await file.delete();
     } catch (_) {
       // best-effort cleanup — ignore if the file is locked or already gone

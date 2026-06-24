@@ -1,19 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:winche_storage/winche_storage.dart';
 import 'package:file_picker/file_picker.dart';
 
 void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
   final storage = WincheStorage(
     WincheStorageConfig(
       uri: Uri.parse('http://localhost:5209/files'),
       directoryResolver: () async {
         final dir = await getApplicationDocumentsDirectory();
-        return "${dir.path}/winche_files";
+        return p.join(dir.path, 'winche_files');
       },
+      // Pin files for offline use, with remote-first reads + cache fallback.
+      enableOfflineCache: true,
+      // Durable transfer queue: uploads/downloads resume after an app restart
+      // and self-retry with backoff. Pending transfers resume on construction.
+      enableAutoResume: true,
     ),
   );
-  WidgetsFlutterBinding.ensureInitialized();
 
   runApp(_Application(storage: storage));
 }
@@ -201,18 +208,53 @@ class _HomePageState extends State<_HomePage> {
                   separatorBuilder: (context, index) => const Divider(),
                   itemBuilder: (context, index) {
                     final file = files[index];
+                    final data = file.data!;
                     return ListTile(
-                      title: Text(file.path),
+                      // list() reflects offline state: `isCached` is true once the
+                      // file's content is downloaded locally (`localPath`).
+                      leading: data.isCached
+                          ? const Icon(Icons.offline_pin, color: Colors.green)
+                          : const Icon(Icons.cloud_outlined),
+                      title: Text(file.reference.path),
                       subtitle: Text(
-                        "Size: ${file.data!.sizeBytes} bytes, MimeType: ${file.data!.mimeType}, Metadata: ${file.data!.metadata}, ",
+                        "Size: ${data.sizeBytes} bytes, MimeType: ${data.mimeType}, "
+                        "Offline: ${data.isCached}${data.localPath != null ? ' (${data.localPath})' : ''}",
                       ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          // Pin for offline use: downloads into the managed
+                          // id-keyed cache and keeps it available offline.
+                          IconButton(
+                            tooltip: 'Make available offline',
+                            onPressed: () async {
+                              // Wait for the download to finish, then refresh the
+                              // list so the offline badge (isCached) updates.
+                              await file.reference.makeAvailableOffline();
+                              if (!context.mounted) return;
+                              setState(() {});
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content:
+                                      Text('Pinned offline: ${file.reference.path}'),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.cloud_download_outlined),
+                          ),
                           IconButton(
                             onPressed: () async {
+                              // download() now takes an explicit destination.
+                              final dir =
+                                  await getApplicationDocumentsDirectory();
+                              final saveTo = p.join(
+                                dir.path,
+                                'winche_downloads',
+                                file.reference.name,
+                              );
                               setState(() {
-                                currentDownloadTask = file.reference.download();
+                                currentDownloadTask =
+                                    file.reference.download(saveTo);
                               });
                               await currentDownloadTask!.whenDone;
                               setState(() {
@@ -222,7 +264,7 @@ class _HomePageState extends State<_HomePage> {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Text(
-                                    'Download complete: ${file.path}',
+                                    'Download complete: ${file.reference.path}',
                                   ),
                                 ),
                               );
@@ -281,7 +323,9 @@ class _HomePageState extends State<_HomePage> {
           });
           if (!context.mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Upload complete: ${record?.path}')),
+            SnackBar(
+              content: Text('Upload complete: ${record?.reference.path}'),
+            ),
           );
         },
         child: const Icon(Icons.upload),

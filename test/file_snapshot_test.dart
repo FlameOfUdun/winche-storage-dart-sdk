@@ -25,8 +25,8 @@ void main() {
     expect(s.exists, isFalse);
     expect(s.data, isNull);
     expect(s.name, 'a.png');
-    expect(s.path, 'userFiles/u1/a.png');
-    expect(s.ref, same(ref));
+    expect(s.reference.path, 'userFiles/u1/a.png');
+    expect(s.reference, same(ref));
   });
 
   test('fromData snapshot', () {
@@ -40,7 +40,7 @@ void main() {
   test('reference parent', () {
     expect(ref.parent?.path, 'userFiles/u1');
     expect(ref.name, 'a.png');
-    expect(ref.fullPath, 'userFiles/u1/a.png');
+    expect(ref.path, 'userFiles/u1/a.png');
     expect(ChildReference(path: 'root', api: api).parent, isNull);
   });
 }

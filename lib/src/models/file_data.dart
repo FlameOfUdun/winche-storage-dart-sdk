@@ -12,6 +12,16 @@ final class FileData {
   final int sizeBytes;
   final UploadStatus uploadStatus;
 
+  /// Absolute path to the locally stored copy of this file, or null when there
+  /// is none. Set when the file is pinned/registered in the offline catalog.
+  /// This is a client-side field — it is not part of the server record.
+  final String? localPath;
+
+  /// True when the file's content is actually downloaded locally and ready for
+  /// offline use. Distinct from [localPath] (which is set as soon as a file is
+  /// pinned, before its bytes finish downloading). Client-side field.
+  final bool isCached;
+
   const FileData({
     required this.id,
     required this.directory,
@@ -23,6 +33,8 @@ final class FileData {
     required this.mimeType,
     required this.sizeBytes,
     required this.uploadStatus,
+    this.localPath,
+    this.isCached = false,
   });
 
   factory FileData.fromJson(Map<String, dynamic> json) {
@@ -37,6 +49,8 @@ final class FileData {
       mimeType: json['mimeType'] as String,
       sizeBytes: json['sizeBytes'] as int,
       uploadStatus: UploadStatus.values.byName(json['uploadStatus'] as String),
+      localPath: json['localPath'] as String?,
+      isCached: json['isCached'] as bool? ?? false,
     );
   }
 
@@ -44,6 +58,8 @@ final class FileData {
     Map<String, dynamic>? metadata,
     UploadStatus? uploadStatus,
     DateTime? updatedAt,
+    String? localPath,
+    bool? isCached,
   }) {
     return FileData(
       id: id,
@@ -56,6 +72,23 @@ final class FileData {
       mimeType: mimeType,
       sizeBytes: sizeBytes,
       uploadStatus: uploadStatus ?? this.uploadStatus,
+      localPath: localPath ?? this.localPath,
+      isCached: isCached ?? this.isCached,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'directory': directory,
+        'path': path,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+        'metadata': metadata,
+        'version': version,
+        'mimeType': mimeType,
+        'sizeBytes': sizeBytes,
+        'uploadStatus': uploadStatus.name,
+        'localPath': localPath,
+        'isCached': isCached,
+      };
 }
