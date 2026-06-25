@@ -106,11 +106,26 @@ Fold these into **one queue of stable handles**, each backed by a durable record
 - **Rehydrate** — on construction, rebuild handles from the durable records in
   `queued` state and start draining (as `rehydrate()` already does).
 
+## Configuration
+
+The `enableOfflineCache` and `enableAutoResume` config booleans are **removed**.
+The durable queue and offline cache exist whenever a store is configured —
+`directoryResolver` (native) or `inMemory: true`; those become the only knobs.
+Config shrinks to `{uri, tokenProvider, multipartThreshold, inMemory,
+directoryResolver, retry}`.
+
+- `enqueue`/`cache` just work when a store is configured. Called on native
+  **without** a configured store/`directoryResolver` they throw `StateError` at
+  the call (validation moves from construction to call-time).
+- Durable transfers **auto-resume on restart whenever a store is configured**:
+  the controller is created eagerly and `rehydrate()`s pending transfers at
+  startup (no consumer call needed). With no store configured, durable transfers
+  aren't possible.
+- Reads are unaffected — still remote-first; the offline cache only holds what
+  you explicitly `cache`/pin.
+
 ## Decided defaults
 
-- A flag whose subsystem is disabled **throws `StateError`**: `enqueue:true`
-  requires the durable store (`enableAutoResume`); `cache:true` requires
-  `enableOfflineCache`. Predictable over silent degradation.
 - "Permanent failure" = retries exhausted (`maxAttempts`) or a non-retryable
   error (e.g. permission denied / not found). Everything else bounces to
   `queued`.
