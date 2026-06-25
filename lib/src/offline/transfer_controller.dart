@@ -333,6 +333,15 @@ class TransferController {
     }
   }
 
+  /// A snapshot of the persisted transfer queue (pending, running, or failed
+  /// records), optionally filtered by [kind]. Completed transfers are removed
+  /// from the queue, so they never appear here.
+  Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) async {
+    final all = await _queue.all();
+    if (kind == null) return all;
+    return [for (final r in all) if (r.kind == kind) r];
+  }
+
   /// Backstop: retry failed records still within the attempt cap.
   Future<void> retryFailed() async {
     for (final rec in await _queue.all()) {

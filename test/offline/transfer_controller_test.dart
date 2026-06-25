@@ -104,6 +104,37 @@ void main() {
     await ctrl.dispose();
   });
 
+  test('pendingTransfers returns the queue, filterable by kind', () async {
+    final store = MemoryStorageLocalStore();
+    final q = TransferQueue(store);
+    TransferRecord rec(int seq, TransferKind kind, String path) =>
+        TransferRecord(
+          seq: seq,
+          kind: kind,
+          path: path,
+          localPath: '${tmp.path}/$path',
+          mimeType: null,
+          metadata: null,
+          multipartThreshold: null,
+          status: TransferStatus.failed,
+          attempt: 0,
+          lastError: null,
+          createdAt: DateTime.utc(2026, 1, 1),
+        );
+    await q.enqueue((seq) => rec(seq, TransferKind.upload, 'up.png'));
+    await q.enqueue((seq) => rec(seq, TransferKind.download, 'down.png'));
+
+    final ctrl = build(_FailingApi(), store);
+
+    expect((await ctrl.pendingTransfers()).map((r) => r.path).toSet(),
+        {'up.png', 'down.png'});
+    expect(
+        (await ctrl.pendingTransfers(kind: TransferKind.upload))
+            .map((r) => r.path),
+        ['up.png']);
+    await ctrl.dispose();
+  });
+
   test('rehydrate restarts persisted records', () async {
     final store = MemoryStorageLocalStore();
     final api = _FailingApi();

@@ -17,6 +17,9 @@
 * `delete()` now cleans up local state after a successful server delete: it
   evicts any offline copy (local file + catalog entry) and drops any queued or
   in-flight transfer for the path, so a deleted file leaves no orphan behind.
+* Added `WincheStorage.pendingTransfers({TransferKind? kind})` — a snapshot of
+  the durable queue (pending/running/failed records), optionally filtered by
+  kind (e.g. uploads only).
 
 ## 2.0.0
 

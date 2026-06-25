@@ -10,6 +10,7 @@ import 'src/offline/sembast_storage_local_store.dart';
 import 'src/offline/storage_local_store.dart';
 import 'src/offline/transfer_controller.dart';
 import 'src/offline/transfer_event.dart';
+import 'src/offline/transfer_record.dart';
 
 export 'src/child_reference.dart' show ChildReference;
 export 'src/file_snapshot.dart' show FileSnapshot;
@@ -239,6 +240,17 @@ final class WincheStorage {
       throw StateError('enableAutoResume is false; auto-resume disabled.');
     }
     return c.resumeUploads();
+  }
+
+  /// A snapshot of the durable transfer queue — every transfer that hasn't
+  /// completed yet (pending, running, or failed awaiting retry), optionally
+  /// filtered by [kind] (e.g. `TransferKind.upload`). Requires `enableAutoResume`.
+  Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) {
+    final c = _controller;
+    if (c == null) {
+      throw StateError('enableAutoResume is false; auto-resume disabled.');
+    }
+    return c.pendingTransfers(kind: kind);
   }
 
   /// Lifecycle events as the transfer queue drains. Requires `enableAutoResume`.

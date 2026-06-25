@@ -18,6 +18,17 @@ void main() {
     expect(ref.path, 'a/b');
     expect(s.resumeDownloads, throwsStateError);
     expect(s.resumeUploads, throwsStateError);
+    expect(() => s.pendingTransfers(), throwsStateError);
+  });
+
+  test('pendingTransfers returns the queue when auto-resume is on', () async {
+    final s = WincheStorage.withStore(
+      NoopApi(),
+      MemoryStorageLocalStore(),
+      enableAutoResume: true,
+    );
+    expect(await s.pendingTransfers(), isEmpty);
+    await s.dispose();
   });
 
   test('enableAutoResume requires directoryResolver on native', () {

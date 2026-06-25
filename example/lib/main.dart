@@ -66,10 +66,15 @@ class _HomePageState extends State<_HomePage> {
   bool _eventsExpanded = false;
   StreamSubscription<TransferEvent>? _eventsSub;
 
+  /// Snapshot of the durable transfer queue (`storage.pendingTransfers()`).
+  List<TransferRecord> _pending = const [];
+  bool _pendingExpanded = false;
+
   @override
   void initState() {
     super.initState();
     _listing = root.list();
+    _loadPending();
     // Observe the durable transfer queue as it drains (auto-resume).
     _eventsSub = storage.transferEvents.listen((event) {
       if (!mounted) return;
@@ -77,6 +82,7 @@ class _HomePageState extends State<_HomePage> {
         _events.insert(0, event);
         if (_events.length > 10) _events.removeLast();
       });
+      _loadPending(); // the queue changed — refresh the snapshot
     });
   }
 
@@ -90,6 +96,16 @@ class _HomePageState extends State<_HomePage> {
     setState(() {
       _listing = root.list();
     });
+  }
+
+  /// Loads the durable transfer-queue snapshot via `pendingTransfers()`.
+  Future<void> _loadPending() async {
+    try {
+      final pending = await storage.pendingTransfers();
+      if (mounted) setState(() => _pending = pending);
+    } catch (_) {
+      // auto-resume disabled — leave the snapshot empty
+    }
   }
 
   void _snack(String message) {
@@ -140,6 +156,7 @@ class _HomePageState extends State<_HomePage> {
         try {
           await ref.delete();
           _reload();
+          _loadPending(); // delete() drops any queued transfer for the path
           _snack('Deleted: ${ref.path}');
         } catch (e) {
           _snack('Delete failed: $e');
@@ -196,29 +213,43 @@ class _HomePageState extends State<_HomePage> {
       withData: true,
     );
     final picked = result?.files.first;
-    if (picked?.bytes == null) {
+    if (picked == null || (picked.path == null && picked.bytes == null)) {
       _snack('No file selected');
       return;
     }
 
     final file = root.child("test-${DateTime.now().millisecondsSinceEpoch}");
     setState(() {
-      currentUploadTask = file.uploadBytes(
-        picked!.bytes!,
-        "application/octet-stream",
-        metadata: {"description": "Test file upload"},
-        // Pin straight into the offline cache when the toggle is on.
-        makeAvailableOffline: pinOnUpload,
-      );
+      // Prefer a file-backed upload: it joins the durable queue and shows up in
+      // pendingTransfers(). Fall back to bytes when no path is available (web).
+      currentUploadTask = picked.path != null
+          ? file.uploadPath(
+              picked.path!,
+              metadata: {"description": "Test file upload"},
+              makeAvailableOffline: pinOnUpload,
+            )
+          : file.uploadBytes(
+              picked.bytes!,
+              "application/octet-stream",
+              metadata: {"description": "Test file upload"},
+              makeAvailableOffline: pinOnUpload,
+            );
     });
+    _loadPending(); // a transfer was just queued
 
-    final record = await currentUploadTask!.whenDone;
-    if (mounted) setState(() => currentUploadTask = null);
-    _reload();
-    _snack(
-      'Upload complete: ${record?.reference.path}'
-      '${pinOnUpload ? ' (available offline)' : ''}',
-    );
+    try {
+      final record = await currentUploadTask!.whenDone;
+      _snack(
+        'Upload complete: ${record?.reference.path}'
+        '${pinOnUpload ? ' (available offline)' : ''}',
+      );
+    } catch (e) {
+      _snack('Upload failed (queued for retry if auto-resume is on): $e');
+    } finally {
+      if (mounted) setState(() => currentUploadTask = null);
+      _reload();
+      _loadPending();
+    }
   }
 
   @override
@@ -319,6 +350,13 @@ class _HomePageState extends State<_HomePage> {
                 );
               },
             ),
+          ),
+          _PendingTransfersPanel(
+            records: _pending,
+            expanded: _pendingExpanded,
+            onToggle: () =>
+                setState(() => _pendingExpanded = !_pendingExpanded),
+            onRefresh: _loadPending,
           ),
           _TransferEventsFeed(
             events: _events,
@@ -542,5 +580,80 @@ class _TransferEventsFeed extends StatelessWidget {
       case TransferEventType.retrying:
         return Icons.refresh;
     }
+  }
+}
+
+/// A collapsible snapshot of the durable transfer queue, sourced from
+/// `storage.pendingTransfers()`. Each row is a not-yet-completed transfer
+/// (pending / running / failed-awaiting-retry).
+class _PendingTransfersPanel extends StatelessWidget {
+  final List<TransferRecord> records;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final VoidCallback onRefresh;
+
+  const _PendingTransfersPanel({
+    required this.records,
+    required this.expanded,
+    required this.onToggle,
+    required this.onRefresh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      elevation: 4,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.cloud_upload_outlined),
+            title: Text('Pending transfers (${records.length})'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh',
+                  onPressed: onRefresh,
+                ),
+                Icon(expanded ? Icons.expand_more : Icons.expand_less),
+              ],
+            ),
+            onTap: onToggle,
+          ),
+          if (expanded)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 160),
+              child: records.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Text('No pending transfers'),
+                    )
+                  : ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final r in records)
+                          ListTile(
+                            dense: true,
+                            leading: Icon(
+                              r.kind == TransferKind.upload
+                                  ? Icons.upload
+                                  : Icons.download,
+                              size: 18,
+                            ),
+                            title: Text('${r.path} · ${r.status.name}'),
+                            subtitle: Text(
+                              'attempt ${r.attempt}'
+                              '${r.lastError != null ? ' · ${r.lastError}' : ''}',
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+        ],
+      ),
+    );
   }
 }

@@ -385,6 +385,7 @@ final bool deleted = await photoRef.delete(); // false if the file didn't exist
 | `child(path)` | Returns a `ChildReference` for the given path. |
 | `resumeDownloads()` | Drains all queued downloads. Throws `StateError` if `enableAutoResume` is off. |
 | `resumeUploads()` | Drains all queued uploads. Throws `StateError` if `enableAutoResume` is off. |
+| `pendingTransfers({kind})` | Snapshot of the durable queue (pending/running/failed `TransferRecord`s), optionally filtered by `TransferKind`. Throws `StateError` if `enableAutoResume` is off. |
 | `transferEvents` | `Stream<TransferEvent>` of queue lifecycle events. Throws `StateError` if `enableAutoResume` is off. |
 | `clearOfflineCache()` | Evicts every pinned file. Throws `StateError` if `enableOfflineCache` is off. |
 | `dispose()` | Stops the retry timer and closes the local store. |
