@@ -87,7 +87,9 @@ class _HomePageState extends State<_HomePage> {
   }
 
   void _reload() {
-    setState(() => _listing = root.list());
+    setState(() {
+      _listing = root.list();
+    });
   }
 
   void _snack(String message) {
@@ -127,13 +129,21 @@ class _HomePageState extends State<_HomePage> {
       case 'download':
         await _download(ref);
       case 'evict':
-        await ref.evict();
-        _reload();
-        _snack('Evicted local copy: ${ref.path}');
+        try {
+          await ref.evict();
+          _reload();
+          _snack('Evicted local copy: ${ref.path}');
+        } catch (e) {
+          _snack('Evict failed: $e');
+        }
       case 'delete':
-        await ref.delete();
-        _reload();
-        _snack('Deleted: ${ref.path}');
+        try {
+          await ref.delete();
+          _reload();
+          _snack('Deleted: ${ref.path}');
+        } catch (e) {
+          _snack('Delete failed: $e');
+        }
     }
   }
 
