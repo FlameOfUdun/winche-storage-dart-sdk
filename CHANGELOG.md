@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## 4.0.0
+## 3.0.0
 
 Robust per-call transfer mechanics, simplified config.
 
@@ -57,9 +57,6 @@ Robust per-call transfer mechanics, simplified config.
   `StorageUnavailableException` when offline). New `offlineSnapshot()` and
   `offlineChildren()` read the local cache only (`fromCache: true`). Compose them
   for the old remote-first-with-fallback behavior.
-
-## 3.0.0
-
 * **Breaking:** `ChildReference.list()` now returns a `DirectorySnapshot` instead
   of `List<FileSnapshot>`. Read the files via `.files`. The snapshot adds
   directory-level metadata (`fromCache`, `name`, `length`, `isEmpty`).
