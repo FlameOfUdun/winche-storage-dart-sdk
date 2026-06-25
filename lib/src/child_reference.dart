@@ -282,8 +282,16 @@ final class ChildReference {
   }
 
   /// Deletes from the server. Returns true if a file was deleted.
+  ///
+  /// Also cleans up local state once the server delete succeeds, so a deleted
+  /// file never leaves an orphan behind: evicts any offline copy (local file +
+  /// catalog entry) and drops any queued/in-flight transfer for this path.
+  /// No-ops when offline cache / auto-resume are off.
   Future<bool> delete() async {
-    return await api.deleteFile(path);
+    final deleted = await api.deleteFile(path);
+    await catalog?.evict(path);
+    await controller?.removePath(path);
+    return deleted;
   }
 
   /// Pins this file for offline use (downloads it to the id-keyed cache).

@@ -14,6 +14,9 @@
   the upload successful and records a stale pin for a later `refresh()`.
 * `isStale()` now returns `false` when the server is unreachable (offline) rather
   than throwing; other API errors still propagate.
+* `delete()` now cleans up local state after a successful server delete: it
+  evicts any offline copy (local file + catalog entry) and drops any queued or
+  in-flight transfer for the path, so a deleted file leaves no orphan behind.
 
 ## 2.0.0
 

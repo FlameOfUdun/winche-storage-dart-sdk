@@ -77,6 +77,33 @@ void main() {
     await ctrl.dispose();
   });
 
+  test('removePath drops persisted transfer records for that path', () async {
+    final store = MemoryStorageLocalStore();
+    final q = TransferQueue(store);
+    TransferRecord rec(int seq, String path) => TransferRecord(
+          seq: seq,
+          kind: TransferKind.download,
+          path: path,
+          localPath: '${tmp.path}/out',
+          mimeType: null,
+          metadata: null,
+          multipartThreshold: null,
+          status: TransferStatus.failed,
+          attempt: 0,
+          lastError: 'x',
+          createdAt: DateTime.utc(2026, 1, 1),
+        );
+    await q.enqueue((seq) => rec(seq, 'a/b.png'));
+    await q.enqueue((seq) => rec(seq, 'other.png'));
+
+    final ctrl = build(_FailingApi(), store);
+    await ctrl.removePath('a/b.png');
+
+    final all = await q.all();
+    expect(all.map((r) => r.path), ['other.png']);
+    await ctrl.dispose();
+  });
+
   test('rehydrate restarts persisted records', () async {
     final store = MemoryStorageLocalStore();
     final api = _FailingApi();

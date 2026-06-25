@@ -311,6 +311,28 @@ class TransferController {
     }
   }
 
+  /// Removes any queued or in-flight transfer for [path] — e.g. after the file
+  /// is deleted — so it is not resumed or retried and leaves no orphaned record.
+  /// Cancels a live task (best-effort) and drops the persisted record(s).
+  Future<void> removePath(String path) async {
+    // Stop any live task so it stops touching the deleted path.
+    _activeDownloads.remove(path)?.cancel();
+    final upload = _activeUploads.remove(path);
+    if (upload != null) {
+      try {
+        await upload.cancel();
+      } catch (_) {
+        // already terminal — nothing to cancel
+      }
+    }
+    // Drop persisted records so the backstop / a restart won't resume them.
+    for (final rec in await _queue.all()) {
+      if (rec.path != path) continue;
+      _running.remove(rec.seq);
+      await _queue.remove(rec.seq);
+    }
+  }
+
   /// Backstop: retry failed records still within the attempt cap.
   Future<void> retryFailed() async {
     for (final rec in await _queue.all()) {
