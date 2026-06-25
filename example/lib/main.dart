@@ -16,11 +16,8 @@ void main() async {
         final dir = await getApplicationDocumentsDirectory();
         return p.join(dir.path, 'winche_files');
       },
-      // Pin files for offline use, with remote-first reads + cache fallback.
-      enableOfflineCache: true,
-      // Durable transfer queue: uploads/downloads resume after an app restart
-      // and self-retry with backoff. Pending transfers resume on construction.
-      enableAutoResume: true,
+      // directoryResolver's presence enables both the durable transfer queue
+      // (auto-resume) and the offline cache — no extra flags needed.
     ),
   );
 
@@ -47,19 +44,32 @@ class _HomePage extends StatefulWidget {
   State<_HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<_HomePage> {
+class _HomePageState extends State<_HomePage>
+    with SingleTickerProviderStateMixin {
   WincheStorage get storage => widget.storage;
   ChildReference get root => storage.child("userFiles/user-123");
 
   UploadTask? currentUploadTask;
   DownloadTask? currentDownloadTask;
 
-  /// When on, uploads are pinned into the offline cache straight away
-  /// (`makeAvailableOffline: true`) — no separate download roundtrip.
-  bool pinOnUpload = false;
+  /// When on, uploads are kept available offline (`cache: true`) — staged and
+  /// placed straight into the offline cache, no separate download roundtrip.
+  bool cacheUploads = false;
 
-  /// The current directory listing. Refreshed via [_reload].
-  late Future<DirectorySnapshot> _listing;
+  /// When on, file uploads are durable (`enqueue: true`) — queued, retried, and
+  /// resumed after a restart, so they appear in the pending-transfers panel.
+  bool queueUploads = true;
+
+  /// The current directory listing (server-only) paired with the set of paths
+  /// pinned for offline use (a separate cache-only read). Refreshed via [_reload].
+  late Future<(DirectorySnapshot, Set<String>)> _listing;
+
+  /// A cache-only listing via `offlineChildren()` — backs the "Cached" tab. Never
+  /// contacts the server. Refreshed via [_reload].
+  late Future<DirectorySnapshot> _cachedListing;
+
+  /// Switches the file view between the server listing and the cached listing.
+  late final TabController _tabController;
 
   /// Recent auto-resume transfer events (most recent first, capped).
   final List<TransferEvent> _events = [];
@@ -73,7 +83,9 @@ class _HomePageState extends State<_HomePage> {
   @override
   void initState() {
     super.initState();
-    _listing = root.list();
+    _tabController = TabController(length: 2, vsync: this);
+    _listing = _loadListing();
+    _cachedListing = root.offlineChildren();
     _loadPending();
     // Observe the durable transfer queue as it drains (auto-resume).
     _eventsSub = storage.transferEvents.listen((event) {
@@ -89,13 +101,39 @@ class _HomePageState extends State<_HomePage> {
   @override
   void dispose() {
     _eventsSub?.cancel();
+    _tabController.dispose();
     super.dispose();
   }
 
   void _reload() {
     setState(() {
-      _listing = root.list();
+      _listing = _loadListing();
+      _cachedListing = root.offlineChildren();
     });
+  }
+
+  /// Loads the live server listing, plus the set of locally-pinned paths used to
+  /// annotate rows. get/list are server-only now, so the offline state comes from
+  /// a separate `offlineChildren()` (cache-only) read. When the server is
+  /// unreachable, falls back to the cached partial view.
+  Future<(DirectorySnapshot, Set<String>)> _loadListing() async {
+    final cached = await _cachedPaths();
+    try {
+      return (await root.listChildren(), cached);
+    } on StorageUnavailableException {
+      return (await root.offlineChildren(), cached);
+    }
+  }
+
+  /// The paths pinned for offline use directly under the root — a cache-only read
+  /// via `offlineChildren()`. Empty when no store is configured.
+  Future<Set<String>> _cachedPaths() async {
+    try {
+      final offline = await root.offlineChildren();
+      return offline.files.map((f) => f.reference.path).toSet();
+    } catch (_) {
+      return const {};
+    }
   }
 
   /// Loads the durable transfer-queue snapshot via `pendingTransfers()`.
@@ -104,7 +142,33 @@ class _HomePageState extends State<_HomePage> {
       final pending = await storage.pendingTransfers();
       if (mounted) setState(() => _pending = pending);
     } catch (_) {
-      // auto-resume disabled — leave the snapshot empty
+      // No store configured — leave the snapshot empty.
+    }
+  }
+
+  /// Reattaches a tracked transfer's live handle (uploadFor / downloadFor) to
+  /// the progress banner — e.g. after a restart, when the original task object
+  /// is gone but the durable transfer is still resuming.
+  void _reattach(TransferRecord rec) {
+    try {
+      if (rec.kind == TransferKind.upload) {
+        final t = storage.uploadFor(rec.path);
+        if (t == null) {
+          _snack('No live upload for ${rec.path}');
+          return;
+        }
+        setState(() => currentUploadTask = t);
+      } else {
+        final t = storage.downloadFor(rec.path);
+        if (t == null) {
+          _snack('No live download for ${rec.path}');
+          return;
+        }
+        setState(() => currentDownloadTask = t);
+      }
+      _snack('Reattached: ${rec.path}');
+    } catch (e) {
+      _snack('Reattach failed: $e');
     }
   }
 
@@ -128,15 +192,14 @@ class _HomePageState extends State<_HomePage> {
         }
       case 'stale':
         try {
-          // Returns false when offline (can't confirm) — never throws on that.
-          final stale = await ref.isStale();
-          _snack(stale ? 'Stale: ${ref.path}' : 'Up to date: ${ref.path}');
+          final status = await ref.offlineCopyStatus();
+          _snack('Offline copy: ${status.name}');
         } catch (e) {
-          _snack('Stale check failed: $e');
+          _snack('Status check failed: $e');
         }
       case 'refresh':
         try {
-          await ref.refresh();
+          await ref.refreshOfflineCopy();
           _reload();
           _snack('Refreshed offline copy: ${ref.path}');
         } catch (e) {
@@ -146,7 +209,7 @@ class _HomePageState extends State<_HomePage> {
         await _download(ref);
       case 'evict':
         try {
-          await ref.evict();
+          await ref.removeOfflineCopy();
           _reload();
           _snack('Evicted local copy: ${ref.path}');
         } catch (e) {
@@ -167,7 +230,8 @@ class _HomePageState extends State<_HomePage> {
   Future<void> _download(ChildReference ref) async {
     final dir = await getApplicationDocumentsDirectory();
     final saveTo = p.join(dir.path, 'winche_downloads', ref.name);
-    setState(() => currentDownloadTask = ref.download(saveTo));
+    // Durable: the download joins the queue and is reattachable via downloadFor.
+    setState(() => currentDownloadTask = ref.download(saveTo, enqueue: true));
     try {
       await currentDownloadTask!.whenDone;
       _snack('Download complete: ${ref.path}');
@@ -226,13 +290,14 @@ class _HomePageState extends State<_HomePage> {
           ? file.uploadPath(
               picked.path!,
               metadata: {"description": "Test file upload"},
-              makeAvailableOffline: pinOnUpload,
+              enqueue: queueUploads,
+              cache: cacheUploads,
             )
           : file.uploadBytes(
               picked.bytes!,
               "application/octet-stream",
               metadata: {"description": "Test file upload"},
-              makeAvailableOffline: pinOnUpload,
+              cache: cacheUploads,
             );
     });
     _loadPending(); // a transfer was just queued
@@ -241,7 +306,7 @@ class _HomePageState extends State<_HomePage> {
       final record = await currentUploadTask!.whenDone;
       _snack(
         'Upload complete: ${record?.reference.path}'
-        '${pinOnUpload ? ' (available offline)' : ''}',
+        '${cacheUploads ? ' (available offline)' : ''}',
       );
     } catch (e) {
       _snack('Upload failed (queued for retry if auto-resume is on): $e');
@@ -252,36 +317,123 @@ class _HomePageState extends State<_HomePage> {
     }
   }
 
+  /// The "Server" tab — a live `listChildren()` listing, annotated with which
+  /// paths are also cached, falling back to `offlineChildren()` when offline.
+  Widget _buildServerList() {
+    return FutureBuilder<(DirectorySnapshot, Set<String>)>(
+      future: _listing,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text('Error loading files: ${snapshot.error}'));
+        }
+        final (dir, cached) = snapshot.data!;
+        return Column(
+          children: [
+            if (dir.fromCache) _OfflineBanner(count: dir.length),
+            Expanded(
+              child: dir.isEmpty
+                  ? Center(
+                      child: Text(
+                        dir.fromCache
+                            ? 'No files pinned for offline use'
+                            : 'No files found',
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: dir.length,
+                      separatorBuilder: (context, index) =>
+                          const Divider(height: 1),
+                      itemBuilder: (context, index) => _FileTile(
+                        file: dir.files[index],
+                        cached:
+                            cached.contains(dir.files[index].reference.path),
+                        onAction: _handleAction,
+                      ),
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// The "Cached" tab — a cache-only `offlineChildren()` listing. Never contacts
+  /// the server; shows only the files pinned for offline use under the root.
+  Widget _buildCachedList() {
+    return FutureBuilder<DirectorySnapshot>(
+      future: _cachedListing,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text('Error loading cache: ${snapshot.error}'));
+        }
+        final dir = snapshot.data!;
+        if (dir.isEmpty) {
+          return const Center(child: Text('No files pinned for offline use'));
+        }
+        return ListView.separated(
+          itemCount: dir.length,
+          separatorBuilder: (context, index) => const Divider(height: 1),
+          itemBuilder: (context, index) => _FileTile(
+            file: dir.files[index],
+            cached: true,
+            onAction: _handleAction,
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Winche Storage Example'),
         actions: [
-          // Pin-on-upload toggle.
-          Row(
-            children: [
-              const Text('Pin on upload'),
-              Switch(
-                value: pinOnUpload,
-                onChanged: (v) => setState(() => pinOnUpload = v),
-              ),
-            ],
-          ),
+          // Per-call upload flags + actions, consolidated into one menu.
           PopupMenuButton<String>(
             onSelected: (value) {
-              if (value == 'reload') _reload();
-              if (value == 'clear') _clearOfflineCache();
+              switch (value) {
+                case 'pin':
+                  setState(() => cacheUploads = !cacheUploads);
+                case 'queue':
+                  setState(() => queueUploads = !queueUploads);
+                case 'reload':
+                  _reload();
+                case 'clear':
+                  _clearOfflineCache();
+              }
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'reload', child: Text('Reload list')),
-              PopupMenuItem(
-                value: 'clear',
-                child: Text('Clear offline cache'),
+            itemBuilder: (context) => [
+              CheckedPopupMenuItem(
+                value: 'pin',
+                checked: cacheUploads,
+                child: const Text('Keep offline (cache)'),
               ),
+              CheckedPopupMenuItem(
+                value: 'queue',
+                checked: queueUploads,
+                child: const Text('Durable upload (enqueue)'),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(value: 'reload', child: Text('Reload list')),
+              const PopupMenuItem(
+                  value: 'clear', child: Text('Clear offline cache')),
             ],
           ),
         ],
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: 'Server', icon: Icon(Icons.cloud_outlined)),
+            Tab(text: 'Cached', icon: Icon(Icons.offline_pin)),
+          ],
+        ),
       ),
       body: Column(
         children: [
@@ -312,43 +464,12 @@ class _HomePageState extends State<_HomePage> {
               onCancel: () => currentDownloadTask!.cancel(),
             ),
           Expanded(
-            child: FutureBuilder<DirectorySnapshot>(
-              future: _listing,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return Center(
-                    child: Text('Error loading files: ${snapshot.error}'),
-                  );
-                }
-                final dir = snapshot.data!;
-                return Column(
-                  children: [
-                    if (dir.fromCache) _OfflineBanner(count: dir.length),
-                    Expanded(
-                      child: dir.isEmpty
-                          ? Center(
-                              child: Text(
-                                dir.fromCache
-                                    ? 'No files pinned for offline use'
-                                    : 'No files found',
-                              ),
-                            )
-                          : ListView.separated(
-                              itemCount: dir.length,
-                              separatorBuilder: (context, index) =>
-                                  const Divider(height: 1),
-                              itemBuilder: (context, index) => _FileTile(
-                                file: dir.files[index],
-                                onAction: _handleAction,
-                              ),
-                            ),
-                    ),
-                  ],
-                );
-              },
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                _buildServerList(),
+                _buildCachedList(),
+              ],
             ),
           ),
           _PendingTransfersPanel(
@@ -357,6 +478,7 @@ class _HomePageState extends State<_HomePage> {
             onToggle: () =>
                 setState(() => _pendingExpanded = !_pendingExpanded),
             onRefresh: _loadPending,
+            onReattach: _reattach,
           ),
           _TransferEventsFeed(
             events: _events,
@@ -483,22 +605,28 @@ class _OfflineBanner extends StatelessWidget {
 /// full offline lifecycle (pin / stale / refresh / download / evict / delete).
 class _FileTile extends StatelessWidget {
   final FileSnapshot file;
+
+  /// Whether this path is pinned for offline use — supplied by the parent from a
+  /// separate `offlineChildren()` read, since the server-only listing no longer
+  /// carries cache state.
+  final bool cached;
   final Future<void> Function(FileSnapshot file, String action) onAction;
 
-  const _FileTile({required this.file, required this.onAction});
+  const _FileTile(
+      {required this.file, required this.cached, required this.onAction});
 
   @override
   Widget build(BuildContext context) {
     final data = file.data!;
     return ListTile(
       leading: Icon(
-        data.isCached ? Icons.offline_pin : Icons.cloud_outlined,
-        color: data.isCached ? Colors.green : null,
+        cached ? Icons.offline_pin : Icons.cloud_outlined,
+        color: cached ? Colors.green : null,
       ),
       title: Text(file.reference.path),
       subtitle: Text(
-        'Size: ${data.sizeBytes} bytes · ${data.mimeType}\n'
-        'Offline: ${data.isCached}'
+        'Size: ${data.sizeBytes} bytes · ${data.mimeType} · ${data.contentHash}\n'
+        'Offline: $cached'
         '${data.localPath != null ? ' (${data.localPath})' : ''}',
       ),
       isThreeLine: true,
@@ -591,12 +719,14 @@ class _PendingTransfersPanel extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
   final VoidCallback onRefresh;
+  final void Function(TransferRecord) onReattach;
 
   const _PendingTransfersPanel({
     required this.records,
     required this.expanded,
     required this.onToggle,
     required this.onRefresh,
+    required this.onReattach,
   });
 
   @override
@@ -648,6 +778,10 @@ class _PendingTransfersPanel extends StatelessWidget {
                               'attempt ${r.attempt}'
                               '${r.lastError != null ? ' · ${r.lastError}' : ''}',
                             ),
+                            trailing: const Icon(Icons.open_in_new, size: 16),
+                            // Reattach this tracked transfer's live handle
+                            // (uploadFor / downloadFor) to the progress banner.
+                            onTap: () => onReattach(r),
                           ),
                       ],
                     ),

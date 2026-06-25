@@ -1,6 +1,6 @@
 name: winche_storage
 description: Dart SDK for the WincheStorage backend - a reference-based API with resumable, multipart-aware upload and download tasks for any storage backend.
-version: 3.0.0
+version: 4.0.0
 repository: https://github.com/FlameOfUdun/winche-storage-dart-sdk
 issue_tracker: https://github.com/FlameOfUdun/winche-storage-dart-sdk/issues
 

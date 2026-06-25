@@ -68,69 +68,102 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  test('online: returns fromCache=false with a FileSnapshot per record',
-      () async {
-    final api = _ListApi([_data('dir/a.png'), _data('dir/b.png')]);
-    final ref = ChildReference(path: 'dir', api: api);
+  group('listChildren (server-only)', () {
+    test('returns fromCache=false with a FileSnapshot per record', () async {
+      final api = _ListApi([_data('dir/a.png'), _data('dir/b.png')]);
+      final ref = ChildReference(path: 'dir', api: api);
 
-    final snap = await ref.list();
+      final snap = await ref.listChildren();
 
-    expect(snap.fromCache, isFalse);
-    expect(snap.files.map((f) => f.reference.path), ['dir/a.png', 'dir/b.png']);
-    expect(snap.length, 2);
-    expect(snap.name, 'dir');
+      expect(snap.fromCache, isFalse);
+      expect(
+          snap.files.map((f) => f.reference.path), ['dir/a.png', 'dir/b.png']);
+      expect(snap.length, 2);
+      expect(snap.name, 'dir');
+    });
+
+    test('does not enrich isCached/localPath from the catalog', () async {
+      final api = _ListApi([_data('dir/a.png')]);
+      final cat = catFor(api);
+      await cat.debugPut(_entry('dir/a.png', tmp.path));
+      final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+
+      final snap = await ref.listChildren();
+
+      expect(snap.files.single.data!.isCached, isFalse);
+      expect(snap.files.single.data!.localPath, isNull);
+    });
+
+    test('throws offline even with a catalog', () async {
+      final api = _OfflineListApi();
+      final cat = catFor(api);
+      await cat.debugPut(_entry('dir/a.png', tmp.path));
+      final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+
+      expect(ref.listChildren, throwsA(isA<StorageUnavailableException>()));
+    });
+
+    test('throws offline with no catalog', () async {
+      final ref = ChildReference(path: 'dir', api: _OfflineListApi());
+      expect(ref.listChildren, throwsA(isA<StorageUnavailableException>()));
+    });
+
+    test('non-offline API errors propagate', () async {
+      final api = _ErrorListApi();
+      final ref = ChildReference(path: 'dir', api: api, catalog: catFor(api));
+      expect(ref.listChildren, throwsA(isA<StorageInternalException>()));
+    });
   });
 
-  test('online: enriches isCached/localPath from the catalog', () async {
-    final api = _ListApi([_data('dir/a.png')]);
-    final cat = catFor(api);
-    await cat.debugPut(_entry('dir/a.png', tmp.path));
-    final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+  group('offlineChildren (cache-only)', () {
+    test('returns pinned files directly under the path, fromCache=true',
+        () async {
+      final cat = catFor(NoopApi());
+      for (final p in [
+        'dir/a.png',
+        'dir/b.png',
+        'dir/sub/c.png',
+        'other/d.png'
+      ]) {
+        await cat.debugPut(_entry(p, tmp.path));
+      }
+      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
 
-    final snap = await ref.list();
+      final snap = await ref.offlineChildren();
 
-    expect(snap.files.single.data!.isCached, isTrue);
-    expect(snap.files.single.data!.localPath, '${tmp.path}/dir_a.png');
-  });
+      expect(snap.fromCache, isTrue);
+      expect(snap.files.map((f) => f.reference.path).toList()..sort(),
+          ['dir/a.png', 'dir/b.png']);
+      expect(snap.files.every((f) => f.fromCache), isTrue);
+    });
 
-  test('offline: returns pinned files directly under the path, fromCache=true',
-      () async {
-    final api = _OfflineListApi();
-    final cat = catFor(api);
-    for (final p in ['dir/a.png', 'dir/b.png', 'dir/sub/c.png', 'other/d.png']) {
-      await cat.debugPut(_entry(p, tmp.path));
-    }
-    final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+    test('applies the mimeType filter', () async {
+      final cat = catFor(NoopApi());
+      await cat.debugPut(_entry('dir/a.png', tmp.path, mime: 'image/png'));
+      await cat.debugPut(_entry('dir/b.jpg', tmp.path, mime: 'image/jpeg'));
+      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
 
-    final snap = await ref.list();
+      final snap = await ref.offlineChildren(mimeType: 'image/jpeg');
 
-    expect(snap.fromCache, isTrue);
-    expect(snap.files.map((f) => f.reference.path).toList()..sort(),
-        ['dir/a.png', 'dir/b.png']);
-    expect(snap.files.every((f) => f.fromCache), isTrue);
-  });
+      expect(snap.fromCache, isTrue);
+      expect(snap.files.map((f) => f.reference.path), ['dir/b.jpg']);
+    });
 
-  test('offline: applies the mimeType filter', () async {
-    final api = _OfflineListApi();
-    final cat = catFor(api);
-    await cat.debugPut(_entry('dir/a.png', tmp.path, mime: 'image/png'));
-    await cat.debugPut(_entry('dir/b.jpg', tmp.path, mime: 'image/jpeg'));
-    final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+    test('empty (fromCache=true) when nothing is pinned under the path',
+        () async {
+      final cat = catFor(NoopApi());
+      await cat.debugPut(_entry('other/d.png', tmp.path));
+      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
 
-    final snap = await ref.list(mimeType: 'image/jpeg');
+      final snap = await ref.offlineChildren();
 
-    expect(snap.fromCache, isTrue);
-    expect(snap.files.map((f) => f.reference.path), ['dir/b.jpg']);
-  });
+      expect(snap.fromCache, isTrue);
+      expect(snap.files, isEmpty);
+    });
 
-  test('offline with no catalog rethrows', () async {
-    final ref = ChildReference(path: 'dir', api: _OfflineListApi());
-    expect(ref.list, throwsA(isA<StorageUnavailableException>()));
-  });
-
-  test('non-offline API errors propagate', () async {
-    final api = _ErrorListApi();
-    final ref = ChildReference(path: 'dir', api: api, catalog: catFor(api));
-    expect(ref.list, throwsA(isA<StorageInternalException>()));
+    test('throws StateError with no store', () async {
+      final ref = ChildReference(path: 'dir', api: NoopApi());
+      expect(ref.offlineChildren, throwsStateError);
+    });
   });
 }

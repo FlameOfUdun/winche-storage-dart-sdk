@@ -31,70 +31,83 @@ FileData _data(String path) => FileData(
     );
 
 void main() {
+  OfflineCatalog catFor(WincheStorageApi api, String dir) => OfflineCatalog(
+        api: api,
+        store: MemoryStorageLocalStore(),
+        directoryResolver: () async => dir,
+        multipartThreshold: 5 * 1024 * 1024,
+      );
+
+  CatalogEntry pinned(String dir) => CatalogEntry(
+        data: _data('a/b.png'),
+        localPath: '$dir/id1.png',
+        pinnedAt: DateTime.utc(2026, 1, 1),
+        status: CatalogStatus.ready,
+      );
+
   test('offline methods throw StateError without a catalog', () {
     final ref = ChildReference(path: 'a/b', api: NoopApi());
     expect(ref.makeAvailableOffline, throwsStateError);
-    expect(ref.isStale, throwsStateError);
-    expect(ref.evict, throwsStateError);
+    expect(ref.offlineCopyStatus, throwsStateError);
+    expect(ref.removeOfflineCopy, throwsStateError);
+    expect(ref.offlineSnapshot, throwsStateError);
+    expect(ref.offlineChildren, throwsStateError);
   });
 
-  test('get() is remote-first and folds localPath/isCached into data when pinned',
+  test('getSnapshot is server-only: no cache enrichment even when pinned',
       () async {
     final tmp = Directory.systemTemp.createTempSync('winche-cr');
     addTearDown(() => tmp.deleteSync(recursive: true));
     final api = _Api({'a/b.png': _data('a/b.png')});
-    final cat = OfflineCatalog(
-      api: api,
-      store: MemoryStorageLocalStore(),
-      directoryResolver: () async => tmp.path,
-      multipartThreshold: 5 * 1024 * 1024,
-    );
-    await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png'),
-      localPath: '${tmp.path}/id1.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
+    final cat = catFor(api, tmp.path);
+    await cat.debugPut(pinned(tmp.path));
     final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
-    final snap = await ref.get();
+
+    final snap = await ref.getSnapshot();
+
     expect(snap.fromCache, isFalse);
-    expect(snap.data!.localPath, '${tmp.path}/id1.png');
-    expect(snap.data!.isCached, isTrue);
+    expect(snap.data!.localPath, isNull);
+    expect(snap.data!.isCached, isFalse);
   });
 
-  test('get() falls back to cache when the server is unreachable', () async {
+  test('getSnapshot throws when the server is unreachable (no fallback)',
+      () async {
     final tmp = Directory.systemTemp.createTempSync('winche-cr');
     addTearDown(() => tmp.deleteSync(recursive: true));
     final api = _Api({'a/b.png': _data('a/b.png')}, failGet: true);
-    final cat = OfflineCatalog(
-      api: api,
-      store: MemoryStorageLocalStore(),
-      directoryResolver: () async => tmp.path,
-      multipartThreshold: 5 * 1024 * 1024,
-    );
-    await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png'),
-      localPath: '${tmp.path}/id1.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
+    final cat = catFor(api, tmp.path);
+    await cat.debugPut(pinned(tmp.path)); // pinned, but no fallback
     final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
-    final snap = await ref.get();
+
+    expect(ref.getSnapshot, throwsException);
+  });
+
+  test('offlineSnapshot returns the cached record without hitting the server',
+      () async {
+    final tmp = Directory.systemTemp.createTempSync('winche-cr');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final api = _Api({}, failGet: true); // server would throw if contacted
+    final cat = catFor(api, tmp.path);
+    await cat.debugPut(pinned(tmp.path));
+    final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
+
+    final snap = await ref.offlineSnapshot();
+
     expect(snap.fromCache, isTrue);
     expect(snap.data!.localPath, '${tmp.path}/id1.png');
     expect(snap.data!.isCached, isTrue);
     expect(snap.data!.id, 'id1');
   });
 
-  test('get() rethrows when server is down and nothing is cached', () async {
+  test('offlineSnapshot returns a missing snapshot when not pinned', () async {
+    final tmp = Directory.systemTemp.createTempSync('winche-cr');
+    addTearDown(() => tmp.deleteSync(recursive: true));
     final api = _Api({}, failGet: true);
-    final cat = OfflineCatalog(
-      api: api,
-      store: MemoryStorageLocalStore(),
-      directoryResolver: () async => '/x',
-      multipartThreshold: 5 * 1024 * 1024,
-    );
+    final cat = catFor(api, tmp.path);
     final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
-    expect(ref.get, throwsException);
+
+    final snap = await ref.offlineSnapshot();
+
+    expect(snap.data, isNull);
   });
 }

@@ -24,7 +24,8 @@ class _ThrowingApi extends NoopApi {
   Future<FileData?> getFile(String path) async => throw _error;
 }
 
-FileData _data(String path, {int version = 1, int size = 3}) => FileData(
+FileData _data(String path, {int version = 1, int size = 3, String? hash}) =>
+    FileData(
       id: 'id-${path.replaceAll('/', '_')}',
       directory: 'd',
       path: path,
@@ -35,6 +36,7 @@ FileData _data(String path, {int version = 1, int size = 3}) => FileData(
       mimeType: 'image/png',
       sizeBytes: size,
       uploadStatus: UploadStatus.complete,
+      contentHash: hash,
     );
 
 File _writeSrc(Directory dir, List<int> bytes) =>
@@ -53,42 +55,6 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  test('isStale: false when nothing pinned', () async {
-    final cat = build({'a/b.png': _data('a/b.png')});
-    expect(await cat.isStale('a/b.png'), isFalse);
-  });
-
-  test('isStale: true when remote version differs from stored', () async {
-    final cat = build({'a/b.png': _data('a/b.png', version: 1)});
-    await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png', version: 1),
-      localPath: '${tmp.path}/id-a_b.png.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
-    expect(await cat.isStale('a/b.png'), isFalse);
-
-    final cat2 = build({'a/b.png': _data('a/b.png', version: 2)});
-    await cat2.debugPut(CatalogEntry(
-      data: _data('a/b.png', version: 1),
-      localPath: '${tmp.path}/id-a_b.png.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
-    expect(await cat2.isStale('a/b.png'), isTrue);
-  });
-
-  test('isStale: true when remote deleted', () async {
-    final cat = build({'a/b.png': null});
-    await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png'),
-      localPath: '${tmp.path}/id-a_b.png.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
-    expect(await cat.isStale('a/b.png'), isTrue);
-  });
-
   OfflineCatalog buildThrowing(Object error) => OfflineCatalog(
         api: _ThrowingApi(error),
         store: MemoryStorageLocalStore(),
@@ -96,26 +62,78 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  test('isStale: false when offline (server unreachable)', () async {
-    final cat = buildThrowing(const StorageUnavailableException('offline'));
-    await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png'),
-      localPath: '${tmp.path}/id-a_b.png',
-      pinnedAt: DateTime.utc(2026, 1, 1),
-      status: CatalogStatus.ready,
-    ));
-    expect(await cat.isStale('a/b.png'), isFalse);
+  test('offlineCopyStatus: notPinned when nothing is cached', () async {
+    final cat = build({'a/b.png': _data('a/b.png')});
+    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.notPinned);
   });
 
-  test('isStale: rethrows non-offline API errors', () async {
-    final cat = buildThrowing(const StorageInternalException('boom'));
+  test('offlineCopyStatus: upToDate when hashes match', () async {
+    final cat = build({'a/b.png': _data('a/b.png', hash: 'h1')});
     await cat.debugPut(CatalogEntry(
-      data: _data('a/b.png'),
+      data: _data('a/b.png', hash: 'h1'),
       localPath: '${tmp.path}/id-a_b.png',
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(() => cat.isStale('a/b.png'),
+    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.upToDate);
+  });
+
+  test('offlineCopyStatus: contentChanged when remote hash differs', () async {
+    final cat = build({'a/b.png': _data('a/b.png', hash: 'h2')});
+    await cat.debugPut(CatalogEntry(
+      data: _data('a/b.png', hash: 'h1'),
+      localPath: '${tmp.path}/id-a_b.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.ready,
+    ));
+    expect(await cat.offlineCopyStatus('a/b.png'),
+        OfflineCopyStatus.contentChanged);
+  });
+
+  test('offlineCopyStatus: remoteDeleted when the server has no record',
+      () async {
+    final cat = build({'a/b.png': null});
+    await cat.debugPut(CatalogEntry(
+      data: _data('a/b.png', hash: 'h1'),
+      localPath: '${tmp.path}/id-a_b.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.ready,
+    ));
+    expect(await cat.offlineCopyStatus('a/b.png'),
+        OfflineCopyStatus.remoteDeleted);
+  });
+
+  test('offlineCopyStatus: unknown when a hash is missing', () async {
+    final cat = build({'a/b.png': _data('a/b.png')}); // remote hash null
+    await cat.debugPut(CatalogEntry(
+      data: _data('a/b.png', hash: 'h1'),
+      localPath: '${tmp.path}/id-a_b.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.ready,
+    ));
+    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.unknown);
+  });
+
+  test('offlineCopyStatus: unknown when offline', () async {
+    final cat = buildThrowing(const StorageUnavailableException('offline'));
+    await cat.debugPut(CatalogEntry(
+      data: _data('a/b.png', hash: 'h1'),
+      localPath: '${tmp.path}/id-a_b.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.ready,
+    ));
+    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.unknown);
+  });
+
+  test('offlineCopyStatus: rethrows non-offline API errors', () async {
+    final cat = buildThrowing(const StorageInternalException('boom'));
+    await cat.debugPut(CatalogEntry(
+      data: _data('a/b.png', hash: 'h1'),
+      localPath: '${tmp.path}/id-a_b.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.ready,
+    ));
+    expect(() => cat.offlineCopyStatus('a/b.png'),
         throwsA(isA<StorageInternalException>()));
   });
 

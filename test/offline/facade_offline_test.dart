@@ -25,36 +25,14 @@ void main() {
     final s = WincheStorage.withStore(
       NoopApi(),
       MemoryStorageLocalStore(),
-      enableAutoResume: true,
     );
     expect(await s.pendingTransfers(), isEmpty);
     await s.dispose();
   });
 
-  test('enableAutoResume requires directoryResolver on native', () {
-    expect(
-      () => WincheStorage(WincheStorageConfig(
-        uri: Uri.parse('https://x/f'),
-        enableAutoResume: true,
-      )),
-      throwsArgumentError,
-    );
-  });
-
-  test('enableOfflineCache requires directoryResolver on native', () {
-    expect(
-      () => WincheStorage(WincheStorageConfig(
-        uri: Uri.parse('https://x/f'),
-        enableOfflineCache: true,
-      )),
-      throwsArgumentError,
-    );
-  });
-
   test('inMemory auto-resume needs no directory and wires resume', () async {
     final s = WincheStorage(WincheStorageConfig(
       uri: Uri.parse('https://x/f'),
-      enableAutoResume: true,
       inMemory: true,
     ));
     await s.resumeDownloads();
@@ -63,7 +41,7 @@ void main() {
     await s.dispose();
   });
 
-  test('facade: makeAvailableOffline uploadPath stages through the controller',
+  test('facade: enqueue+cache uploadPath stages through the controller',
       () async {
     final tmp = Directory.systemTemp.createTempSync('winche-facade-pin');
     addTearDown(() => tmp.deleteSync(recursive: true));
@@ -71,18 +49,16 @@ void main() {
     final storage = WincheStorage.withStore(
       _ThrowingGetFileApi(), // getFile throws -> upload fails after staging
       MemoryStorageLocalStore(),
-      enableOfflineCache: true,
-      enableAutoResume: true,
       directoryResolver: () async => tmp.path,
-      retry: const TransferRetryConfig(
-          maxAttempts: 0, pollInterval: Duration(hours: 1)),
+      retryMaxAttempts: 0,
+      retryPollInterval: const Duration(hours: 1),
     );
     addTearDown(storage.dispose);
 
     final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
     final task = storage
         .child('a/b.png')
-        .uploadPath(src.path, makeAvailableOffline: true);
+        .uploadPath(src.path, enqueue: true, cache: true);
     await task.whenDone.catchError((_) => null);
 
     expect(File(stagingFilePath(tmp.path, 'a/b.png')).existsSync(), isTrue);

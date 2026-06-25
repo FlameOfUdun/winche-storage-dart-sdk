@@ -51,7 +51,7 @@ void main() {
   setUp(() => tmp = Directory.systemTemp.createTempSync('winche-ctrl-pin'));
   tearDown(() => tmp.deleteSync(recursive: true));
 
-  test('a pinned upload through the controller finalizes a ready entry',
+  test('a pinned upload finalizes a ready entry by the time whenDone resolves',
       () async {
     final api = _PinApi();
     final store = MemoryStorageLocalStore();
@@ -84,9 +84,8 @@ void main() {
             multipartThreshold: 5 * 1024 * 1024,
             pinned: true)
         .whenDone;
-    // Let the controller's completion handler run finalize.
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-
+    // Contract: the pin is committed *before* whenDone resolves — no delay,
+    // no waiting on a later controller step.
     final entry = await catalog.entryFor('a/b.png');
     expect(entry!.status, CatalogStatus.ready);
     expect(File(entry.localPath).readAsBytesSync(), [1, 2, 3]);

@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/local_paths.dart';
 import 'package:winche_storage/src/offline/offline_catalog.dart';
@@ -28,13 +27,12 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  test('uploadBytes(makeAvailableOffline: true) stages bytes before uploading',
-      () async {
+  test('uploadBytes(cache: true) stages bytes before uploading', () async {
     final api = _OfflineApi();
     final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat(api));
 
     final task = ref.uploadBytes(Uint8List.fromList([7, 7, 7]), 'image/png',
-        makeAvailableOffline: true);
+        cache: true);
     await task.whenDone.catchError((_) => null);
 
     final staged = stagingFilePath(tmp.path, 'a/b.png');
@@ -42,14 +40,13 @@ void main() {
     expect(File(staged).readAsBytesSync(), [7, 7, 7]);
   });
 
-  test('offline upload with no catalog is a no-op (does not throw)', () async {
+  test('uploadBytes(cache: true) with no catalog throws StateError', () {
     final api = _OfflineApi();
     final ref = ChildReference(path: 'a/b.png', api: api); // catalog == null
 
-    final task = ref.uploadBytes(Uint8List.fromList([1]), 'image/png',
-        makeAvailableOffline: true);
-    await task.whenDone.catchError((_) => null);
-
-    expect(Directory(p.join(tmp.path, '.staging')).existsSync(), isFalse);
+    expect(
+      () => ref.uploadBytes(Uint8List.fromList([1]), 'image/png', cache: true),
+      throwsStateError,
+    );
   });
 }

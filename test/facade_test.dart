@@ -32,7 +32,7 @@ FileData _data() => FileData(
 void main() {
   test('get() returns a missing snapshot when absent', () async {
     final api = _FakeApi()..getResult = null;
-    final s = await ChildReference(path: 'a/b', api: api).get();
+    final s = await ChildReference(path: 'a/b', api: api).getSnapshot();
     expect(s.exists, isFalse);
     expect(s.data, isNull);
   });
@@ -40,7 +40,7 @@ void main() {
   test('get() returns an existing snapshot when present', () async {
     final data = _data();
     final api = _FakeApi()..getResult = data;
-    final s = await ChildReference(path: 'a/b', api: api).get();
+    final s = await ChildReference(path: 'a/b', api: api).getSnapshot();
     expect(s.exists, isTrue);
     expect(s.data, same(data));
   });

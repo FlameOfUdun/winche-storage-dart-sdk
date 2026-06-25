@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import '../child_reference.dart';
 
 enum DownloadTaskStatus {
+  queued,
   running,
   paused,
   complete,
@@ -28,7 +29,7 @@ final class DownloadTaskState {
       DownloadTaskState(status: status, progress: newProgress);
 }
 
-final class DownloadTask {
+abstract class DownloadTask {
   final ChildReference reference;
 
   /// Absolute destination path the file is written to.
@@ -42,7 +43,7 @@ final class DownloadTask {
   final _taskCompleter = Completer<void>();
 
   CancelToken? _cancelToken;
-  DownloadTaskState _state = const DownloadTaskState();
+  DownloadTaskState _state;
 
   DownloadTaskState get state => _state;
   Stream<DownloadTaskState> get stateStream => _stateController.stream;
@@ -54,7 +55,9 @@ final class DownloadTask {
     required this.maxRetries,
     required this.retryBaseDelay,
     required Dio httpClient,
-  }) : _httpClient = httpClient;
+    required DownloadTaskStatus initialStatus,
+  })  : _httpClient = httpClient,
+        _state = DownloadTaskState(status: initialStatus);
 
   factory DownloadTask.start({
     required ChildReference reference,
@@ -66,7 +69,7 @@ final class DownloadTask {
     final client = httpClient ??
         Dio(BaseOptions(validateStatus: (status) => status != null));
 
-    final task = DownloadTask._(
+    final task = _DirectDownloadTask._(
       reference: reference,
       saveTo: saveTo,
       maxRetries: maxRetries,
@@ -76,35 +79,6 @@ final class DownloadTask {
 
     unawaited(task._run());
     return task;
-  }
-
-  Future<void> _run({bool isResume = false}) async {
-    _setStatus(DownloadTaskStatus.running);
-    _cancelToken = CancelToken();
-
-    for (var attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        await _attempt(isResume: isResume);
-        return;
-      } on DioException catch (e, st) {
-        if (e.type == DioExceptionType.cancel) return;
-        if (!_isRunning) return;
-
-        if (attempt == maxRetries) {
-          await _handleFailure(e, st);
-          return;
-        }
-
-        final delay = retryBaseDelay * (1 << attempt);
-        await Future<void>.delayed(delay);
-        if (!_isRunning) return;
-        _cancelToken = CancelToken();
-      } catch (e, st) {
-        if (!_isRunning) return;
-        await _handleFailure(e, st);
-        return;
-      }
-    }
   }
 
   Future<void> _attempt({bool isResume = false}) async {
@@ -210,13 +184,7 @@ final class DownloadTask {
   }
 
   /// Resumes a [DownloadTaskStatus.paused] download.
-  void resume() {
-    if (_state.status != DownloadTaskStatus.paused) {
-      throw StateError(
-          'Cannot resume: task is ${_state.status} (expected paused)');
-    }
-    unawaited(_run(isResume: true));
-  }
+  void resume();
 
   /// Cancels the download and deletes any partially written file.
   void cancel() async {
@@ -283,5 +251,110 @@ final class DownloadTask {
     if (_state.progress == clamped) return;
     _state = _state.withProgress(clamped);
     if (!_stateController.isClosed) _stateController.add(_state);
+  }
+}
+
+/// Private self-driving download task. Starts immediately and retries via [_run].
+class _DirectDownloadTask extends DownloadTask {
+  _DirectDownloadTask._({
+    required super.reference,
+    required super.saveTo,
+    required super.maxRetries,
+    required super.retryBaseDelay,
+    required super.httpClient,
+  }) : super._(initialStatus: DownloadTaskStatus.running);
+
+  Future<void> _run({bool isResume = false}) async {
+    _setStatus(DownloadTaskStatus.running);
+    _cancelToken = CancelToken();
+
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await _attempt(isResume: isResume);
+        return;
+      } on DioException catch (e, st) {
+        if (e.type == DioExceptionType.cancel) return;
+        if (!_isRunning) return;
+
+        if (attempt == maxRetries) {
+          await _handleFailure(e, st);
+          return;
+        }
+
+        final delay = retryBaseDelay * (1 << attempt);
+        await Future<void>.delayed(delay);
+        if (!_isRunning) return;
+        _cancelToken = CancelToken();
+      } catch (e, st) {
+        if (!_isRunning) return;
+        await _handleFailure(e, st);
+        return;
+      }
+    }
+  }
+
+  @override
+  void resume() {
+    if (_state.status != DownloadTaskStatus.paused) {
+      throw StateError(
+          'Cannot resume: task is ${_state.status} (expected paused)');
+    }
+    unawaited(_run(isResume: true));
+  }
+}
+
+/// Controller-driven download task. Starts [DownloadTaskStatus.queued] and does
+/// NOT auto-run. The controller drives attempts via [runOnce].
+class ManagedDownloadTask extends DownloadTask {
+  ManagedDownloadTask({
+    required super.reference,
+    required super.saveTo,
+    Dio? httpClient,
+  }) : super._(
+          maxRetries: 0,
+          retryBaseDelay: const Duration(seconds: 1),
+          httpClient: httpClient ??
+              Dio(BaseOptions(validateStatus: (status) => status != null)),
+          initialStatus: DownloadTaskStatus.queued,
+        );
+
+  /// Invoked by [resume] so the controller re-drives the same handle.
+  /// Set by the controller.
+  void Function()? onResume;
+
+  /// Runs exactly one attempt (managed mode). On success the task completes
+  /// ([DownloadTaskStatus.complete], `whenDone` resolves). On failure it returns
+  /// to [DownloadTaskStatus.queued] and rethrows WITHOUT completing `whenDone`,
+  /// so the controller can retry the same handle or call [failPermanently].
+  Future<void> runOnce({bool isResume = false}) async {
+    _setStatus(DownloadTaskStatus.running);
+    _cancelToken = CancelToken();
+    try {
+      await _attempt(isResume: isResume);
+    } catch (e) {
+      if (e is DioException && e.type == DioExceptionType.cancel) return;
+      _setStatus(DownloadTaskStatus.queued);
+      rethrow;
+    }
+  }
+
+  /// Terminal failure (managed mode): retries exhausted / non-retryable. Sets
+  /// [DownloadTaskStatus.failed] and errors `whenDone`.
+  void failPermanently(Object error, [StackTrace? st]) {
+    _setStatus(DownloadTaskStatus.failed);
+    if (!_taskCompleter.isCompleted) {
+      _taskCompleter.completeError(error, st);
+    }
+    _closeStreams();
+  }
+
+  @override
+  void resume() {
+    if (_state.status != DownloadTaskStatus.paused) {
+      throw StateError(
+          'Cannot resume: task is ${_state.status} (expected paused)');
+    }
+    _setStatus(DownloadTaskStatus.queued);
+    onResume?.call();
   }
 }

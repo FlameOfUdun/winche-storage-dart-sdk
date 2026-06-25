@@ -10,6 +10,7 @@ import '../models/file_data.dart';
 import '../tasks/download_task.dart';
 import 'catalog_entry.dart';
 import 'local_paths.dart';
+import 'offline_copy_status.dart';
 import 'storage_local_store.dart';
 import 'transfer_controller.dart';
 import 'upload_pin_sink.dart';
@@ -48,8 +49,10 @@ class OfflineCatalog implements UploadPinSink {
       [for (final j in await _store.allCatalog()) CatalogEntry.fromJson(j)];
 
   /// Pins [ref] for offline use: downloads it to `<dir>/<id><.ext>` and tracks
-  /// it. Completes when the download finishes. A second pin/refresh for the same
-  /// path while one is in flight returns the same future.
+  /// it. When [ref] is a directory (no file record, but files listed directly
+  /// under it), pins each of those files instead. Completes when the download(s)
+  /// finish. A second pin/refresh for the same path while one is in flight
+  /// returns the same future.
   Future<void> pin(ChildReference ref) => _download(ref);
 
   /// Re-downloads the current remote version of a pinned file.
@@ -60,16 +63,27 @@ class OfflineCatalog implements UploadPinSink {
     if (existing != null) return existing;
     final fut = _doDownload(ref);
     _activePins[ref.path] = fut;
+    // Cleanup only — the caller observes success/failure via the returned [fut];
+    // `.ignore()` keeps a failed pin from surfacing here as an unhandled error.
     fut.whenComplete(() {
       if (identical(_activePins[ref.path], fut)) _activePins.remove(ref.path);
-    });
+    }).ignore();
     return fut;
   }
 
   Future<void> _doDownload(ChildReference ref) async {
     final remote = await _api.getFile(ref.path);
     if (remote == null) {
-      throw StateError('Cannot pin "${ref.path}": not found on server.');
+      // No file record at this path. If it's a directory — i.e. the server lists
+      // files directly under it — pin each of those files. (listDirectory returns
+      // one level only, so nested sub-directories are not included.) A genuinely
+      // missing path lists empty and surfaces the not-found error.
+      final files = await _api.listDirectory(ref.path);
+      if (files.isEmpty) {
+        throw StateError('Cannot pin "${ref.path}": not found on server.');
+      }
+      await Future.wait([for (final f in files) _download(_refFor(f.path))]);
+      return;
     }
     final resolver = _directoryResolver;
     if (resolver == null) {
@@ -105,23 +119,39 @@ class OfflineCatalog implements UploadPinSink {
     }
   }
 
-  /// True when the pinned file's remote version has changed (or it was deleted).
-  /// False when nothing is pinned at [path], or when the server is unreachable
-  /// (offline): staleness can't be confirmed, so the pinned copy is treated as
-  /// current rather than surfacing an error. Other API errors still propagate.
-  Future<bool> isStale(String path) async {
+  /// The freshness of the pinned copy at [path] relative to the server. Compares
+  /// the cached content fingerprint against the current remote one; returns
+  /// [OfflineCopyStatus.unknown] when offline or when either fingerprint is
+  /// absent. Other (non-offline) API errors propagate.
+  Future<OfflineCopyStatus> offlineCopyStatus(String path) async {
     final entry = await entryFor(path);
-    if (entry == null) return false;
+    if (entry == null) return OfflineCopyStatus.notPinned;
     final FileData? remote;
     try {
       remote = await _api.getFile(path);
     } on StorageUnavailableException {
-      return false; // offline — can't compare; assume the cached copy is current
+      return OfflineCopyStatus.unknown;
     }
-    if (remote == null) return true;
-    return remote.version != entry.data.version ||
-        remote.updatedAt != entry.data.updatedAt ||
-        remote.sizeBytes != entry.data.sizeBytes;
+    if (remote == null) return OfflineCopyStatus.remoteDeleted;
+    final remoteHash = remote.contentHash;
+    final cachedHash = entry.data.contentHash;
+    if (remoteHash == null || cachedHash == null) {
+      return OfflineCopyStatus.unknown;
+    }
+    return remoteHash == cachedHash
+        ? OfflineCopyStatus.upToDate
+        : OfflineCopyStatus.contentChanged;
+  }
+
+  /// Updates a pinned file's cached metadata after a successful server write,
+  /// so offline reads ([offlineSnapshot]/[offlineChildren]) stay current. Only
+  /// the metadata is touched — the content fingerprint (and every byte-identity
+  /// field) is preserved, so [offlineCopyStatus] still correctly flags stale
+  /// cached *bytes* even if the server content changed too. No-op when not pinned.
+  Future<void> syncMetadata(String path, Map<String, dynamic> metadata) async {
+    final entry = await entryFor(path);
+    if (entry == null) return;
+    await _put(entry.copyWith(data: entry.data.copyWith(metadata: metadata)));
   }
 
   /// Removes the local file (best-effort) and the catalog entry.

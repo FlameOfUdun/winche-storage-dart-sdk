@@ -22,6 +22,11 @@ final class FileData {
   /// pinned, before its bytes finish downloading). Client-side field.
   final bool isCached;
 
+  /// The server's content fingerprint (the object ETag) at the time this record
+  /// was read. Changes when the file's bytes are overwritten, not on a
+  /// metadata-only change. Null when the server hasn't recorded one. Server-side.
+  final String? contentHash;
+
   const FileData({
     required this.id,
     required this.directory,
@@ -35,6 +40,7 @@ final class FileData {
     required this.uploadStatus,
     this.localPath,
     this.isCached = false,
+    this.contentHash,
   });
 
   factory FileData.fromJson(Map<String, dynamic> json) {
@@ -51,6 +57,7 @@ final class FileData {
       uploadStatus: UploadStatus.values.byName(json['uploadStatus'] as String),
       localPath: json['localPath'] as String?,
       isCached: json['isCached'] as bool? ?? false,
+      contentHash: json['contentHash'] as String?,
     );
   }
 
@@ -60,6 +67,7 @@ final class FileData {
     DateTime? updatedAt,
     String? localPath,
     bool? isCached,
+    String? contentHash,
   }) {
     return FileData(
       id: id,
@@ -74,6 +82,7 @@ final class FileData {
       uploadStatus: uploadStatus ?? this.uploadStatus,
       localPath: localPath ?? this.localPath,
       isCached: isCached ?? this.isCached,
+      contentHash: contentHash ?? this.contentHash,
     );
   }
 
@@ -90,5 +99,6 @@ final class FileData {
         'uploadStatus': uploadStatus.name,
         'localPath': localPath,
         'isCached': isCached,
+        'contentHash': contentHash,
       };
 }

@@ -11,6 +11,8 @@ import 'src/offline/storage_local_store.dart';
 import 'src/offline/transfer_controller.dart';
 import 'src/offline/transfer_event.dart';
 import 'src/offline/transfer_record.dart';
+import 'src/tasks/download_task.dart';
+import 'src/tasks/upload_task.dart';
 
 export 'src/child_reference.dart' show ChildReference;
 export 'src/file_snapshot.dart' show FileSnapshot;
@@ -36,10 +38,11 @@ export 'src/offline/catalog_entry.dart' show CatalogEntry, CatalogStatus;
 export 'src/offline/transfer_record.dart'
     show TransferRecord, TransferKind, TransferStatus;
 export 'src/offline/transfer_event.dart'
-    show TransferEvent, TransferEventType, TransferRetryConfig;
+    show TransferEvent, TransferEventType;
+export 'src/offline/offline_copy_status.dart' show OfflineCopyStatus;
 
 /// True on the web, where Dart's numeric types collapse so `0` and `0.0` are
-/// identical. Used to relax the native `directoryResolver` requirement.
+/// identical. On web the durable store uses IndexedDB (no directory needed).
 const bool _kIsWeb = identical(0, 0.0);
 
 /// Connection and offline options for [WincheStorage].
@@ -53,34 +56,41 @@ final class WincheStorageConfig {
   /// Files larger than this are uploaded in multiple parts. Defaults to 5 MiB.
   final int multipartThreshold;
 
-  /// Opt-in: pin files for offline use, with remote-first reads and a cache
-  /// fallback. Requires [directoryResolver] on native. Defaults to false.
-  final bool enableOfflineCache;
-
-  /// Opt-in: durable transfer queue that resumes uploads/downloads after a
-  /// restart and self-retries with backoff. Requires [directoryResolver] on
-  /// native unless [inMemory] is true. Defaults to false.
-  final bool enableAutoResume;
-
   /// Use a non-persistent in-memory index (catalog + transfer queue) instead of
   /// sembast. Files still go to disk via [directoryResolver]. Defaults to false.
   final bool inMemory;
 
   /// Resolves the default download directory and the offline cache root.
+  ///
+  /// Its presence (or [inMemory], or web) enables the durable transfer queue and
+  /// offline cache. With none of those configured on native, the client is
+  /// stateless and durable/offline operations throw `StateError` at call time.
   final Future<String> Function()? directoryResolver;
 
-  /// Backoff tunables for [enableAutoResume].
-  final TransferRetryConfig retry;
+  /// Initial backoff before the first durable-transfer retry. Defaults to 1s.
+  final Duration retryBaseDelay;
+
+  /// Cap on the exponential backoff between retries. Defaults to 30s.
+  final Duration retryMaxDelay;
+
+  /// How many times a failed transfer is retried before giving up permanently.
+  /// Defaults to 5.
+  final int retryMaxAttempts;
+
+  /// Interval of the backstop poll that re-drives failed transfers still within
+  /// the attempt cap. Defaults to 30s.
+  final Duration retryPollInterval;
 
   const WincheStorageConfig({
     required this.uri,
     this.tokenProvider,
     this.multipartThreshold = 5 * 1024 * 1024,
-    this.enableOfflineCache = false,
-    this.enableAutoResume = false,
     this.inMemory = false,
     this.directoryResolver,
-    this.retry = const TransferRetryConfig(),
+    this.retryBaseDelay = const Duration(seconds: 1),
+    this.retryMaxDelay = const Duration(seconds: 30),
+    this.retryMaxAttempts = 5,
+    this.retryPollInterval = const Duration(seconds: 30),
   });
 }
 
@@ -110,17 +120,12 @@ final class WincheStorage {
   }
 
   factory WincheStorage(WincheStorageConfig config) {
-    final needsStore = config.enableOfflineCache || config.enableAutoResume;
-    final needsDir = config.enableOfflineCache ||
-        (config.enableAutoResume && !config.inMemory);
-    if (needsDir && !_kIsWeb && config.directoryResolver == null) {
-      throw ArgumentError(
-          'directoryResolver is required on native when offline cache or '
-          'persistent auto-resume is enabled.');
-    }
-
     final resolver = config.directoryResolver;
     final resolveDirectory = resolver == null ? null : _memoize(resolver);
+
+    // The durable queue + offline cache exist when there's somewhere to put a
+    // store: a directory (native), an in-memory index, or web (IndexedDB).
+    final needsStore = config.inMemory || resolver != null || _kIsWeb;
 
     final api = WincheStorageHttpApi(
       baseUrl: config.uri.toString(),
@@ -139,49 +144,55 @@ final class WincheStorage {
     return WincheStorage._build(
       api: api,
       store: store,
-      enableOfflineCache: config.enableOfflineCache,
-      enableAutoResume: config.enableAutoResume,
       multipartThreshold: config.multipartThreshold,
       resolveDirectory: resolveDirectory,
-      retry: config.retry,
+      retry: TransferRetryConfig(
+        baseDelay: config.retryBaseDelay,
+        maxDelay: config.retryMaxDelay,
+        maxAttempts: config.retryMaxAttempts,
+        pollInterval: config.retryPollInterval,
+      ),
     );
   }
 
-  /// Advanced / testing: build a client over an explicit [api] and [store].
+  /// Advanced / testing: build a client over an explicit [api] and [store]. The
+  /// durable queue + offline cache are always available (the store is explicit).
   factory WincheStorage.withStore(
     WincheStorageApi api,
     StorageLocalStore store, {
-    bool enableOfflineCache = false,
-    bool enableAutoResume = false,
     int multipartThreshold = 5 * 1024 * 1024,
     Future<String> Function()? directoryResolver,
-    TransferRetryConfig retry = const TransferRetryConfig(),
+    Duration retryBaseDelay = const Duration(seconds: 1),
+    Duration retryMaxDelay = const Duration(seconds: 30),
+    int retryMaxAttempts = 5,
+    Duration retryPollInterval = const Duration(seconds: 30),
   }) {
     final resolveDirectory =
         directoryResolver == null ? null : _memoize(directoryResolver);
     return WincheStorage._build(
       api: api,
       store: store,
-      enableOfflineCache: enableOfflineCache,
-      enableAutoResume: enableAutoResume,
       multipartThreshold: multipartThreshold,
       resolveDirectory: resolveDirectory,
-      retry: retry,
+      retry: TransferRetryConfig(
+        baseDelay: retryBaseDelay,
+        maxDelay: retryMaxDelay,
+        maxAttempts: retryMaxAttempts,
+        pollInterval: retryPollInterval,
+      ),
     );
   }
 
   factory WincheStorage._build({
     required WincheStorageApi api,
     required StorageLocalStore? store,
-    required bool enableOfflineCache,
-    required bool enableAutoResume,
     required int multipartThreshold,
     required Future<String> Function()? resolveDirectory,
     required TransferRetryConfig retry,
   }) {
-    // Controller first, so the catalog can route pins through it (durable +
-    // de-duped) when auto-resume is also enabled.
-    final controller = (enableAutoResume && store != null)
+    // When a store is configured, the durable queue + offline cache exist.
+    // Controller first, so the catalog can route pins through it.
+    final controller = store != null
         ? TransferController(
             api: api,
             store: store,
@@ -190,7 +201,7 @@ final class WincheStorage {
             retry: retry,
           )
         : null;
-    final catalog = (enableOfflineCache && store != null)
+    final catalog = store != null
         ? OfflineCatalog(
             api: api,
             store: store,
@@ -224,49 +235,77 @@ final class WincheStorage {
     );
   }
 
-  /// Resumes all queued downloads. Requires `enableAutoResume`.
+  /// Resumes all queued downloads. Requires a store (directoryResolver, inMemory, or web).
   Future<void> resumeDownloads() {
     final c = _controller;
     if (c == null) {
-      throw StateError('enableAutoResume is false; auto-resume disabled.');
+      throw StateError(
+          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
     }
     return c.resumeDownloads();
   }
 
-  /// Resumes all queued uploads. Requires `enableAutoResume`.
+  /// Resumes all queued uploads. Requires a store (directoryResolver, inMemory, or web).
   Future<void> resumeUploads() {
     final c = _controller;
     if (c == null) {
-      throw StateError('enableAutoResume is false; auto-resume disabled.');
+      throw StateError(
+          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
     }
     return c.resumeUploads();
   }
 
   /// A snapshot of the durable transfer queue — every transfer that hasn't
   /// completed yet (pending, running, or failed awaiting retry), optionally
-  /// filtered by [kind] (e.g. `TransferKind.upload`). Requires `enableAutoResume`.
+  /// filtered by [kind] (e.g. `TransferKind.upload`).
+  /// Requires a store (directoryResolver, inMemory, or web).
   Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) {
     final c = _controller;
     if (c == null) {
-      throw StateError('enableAutoResume is false; auto-resume disabled.');
+      throw StateError(
+          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
     }
     return c.pendingTransfers(kind: kind);
   }
 
-  /// Lifecycle events as the transfer queue drains. Requires `enableAutoResume`.
+  /// The live tracked upload handle for [path], or null when none is in flight.
+  /// Throws `StateError` when no store is configured.
+  UploadTask? uploadFor(String path) {
+    final c = _controller;
+    if (c == null) {
+      throw StateError('no durable store configured; cannot track transfers.');
+    }
+    return c.uploadFor(path);
+  }
+
+  /// The live tracked download handle for [path], or null when none is in flight.
+  /// Throws `StateError` when no store is configured.
+  DownloadTask? downloadFor(String path) {
+    final c = _controller;
+    if (c == null) {
+      throw StateError('no durable store configured; cannot track transfers.');
+    }
+    return c.downloadFor(path);
+  }
+
+  /// Lifecycle events as the transfer queue drains.
+  /// Requires a store (directoryResolver, inMemory, or web).
   Stream<TransferEvent> get transferEvents {
     final c = _controller;
     if (c == null) {
-      throw StateError('enableAutoResume is false; auto-resume disabled.');
+      throw StateError(
+          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
     }
     return c.events;
   }
 
-  /// Evicts every pinned offline file. Requires `enableOfflineCache`.
+  /// Evicts every pinned offline file.
+  /// Requires a store (directoryResolver, inMemory, or web).
   Future<void> clearOfflineCache() {
     final c = _catalog;
     if (c == null) {
-      throw StateError('enableOfflineCache is false; offline cache disabled.');
+      throw StateError(
+          'No store configured; configure directoryResolver or inMemory to enable offline cache.');
     }
     return c.clear();
   }

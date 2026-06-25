@@ -4,7 +4,6 @@ import 'package:dio/dio.dart';
 
 import '../api/winche_storage_api.dart';
 import '../child_reference.dart';
-import '../file_snapshot.dart';
 import '../tasks/download_task.dart';
 import '../tasks/upload_task.dart';
 import 'storage_local_store.dart';
@@ -47,8 +46,8 @@ class TransferController {
   final Set<int> _running = {};
 
   /// Live tasks keyed by path — de-dups concurrent starts for the same path.
-  final Map<String, DownloadTask> _activeDownloads = {};
-  final Map<String, UploadTask> _activeUploads = {};
+  final Map<String, ManagedDownloadTask> _activeDownloads = {};
+  final Map<String, ManagedUploadTask> _activeUploads = {};
 
   Timer? _poll;
   bool _disposed = false;
@@ -69,10 +68,9 @@ class TransferController {
   DownloadTask startDownload(ChildReference ref, {required String saveTo}) {
     final existing = _activeDownloads[ref.path];
     if (existing != null) return existing;
-    final task = DownloadTask.start(
+    final task = ManagedDownloadTask(
       reference: ref,
       saveTo: saveTo,
-      maxRetries: 0,
       httpClient: _httpClient,
     );
     _activeDownloads[ref.path] = task;
@@ -91,16 +89,20 @@ class TransferController {
     final existing = _activeUploads[ref.path];
     if (existing != null) return existing;
     final sink = pinned ? pinSink : null;
-    final task = UploadTask.start(
+    final task = ManagedUploadTask(
       reference: ref,
       localPath: localPath,
       mimeType: mimeType,
       metadata: metadata,
       multipartThreshold: multipartThreshold,
-      maxRetries: 0,
       httpClient: _httpClient,
       stageSource:
           sink == null ? null : () => sink.stageUpload(ref.path, localPath),
+      // Finalize the pin within the task (before whenDone), so a completed
+      // tracked upload guarantees its offline copy is committed.
+      onPinFinalize: sink == null
+          ? null
+          : (confirmed) => sink.finalizeUploadPin(ref.path, confirmed),
     );
     _activeUploads[ref.path] = task;
     unawaited(_registerUpload(
@@ -110,20 +112,18 @@ class TransferController {
       metadata: metadata,
       multipartThreshold: multipartThreshold,
       pinned: pinned,
-      done: task.whenDone,
     ));
     return task;
   }
 
   Future<void> _registerDownload(String path, DownloadTask task) async {
-    final resolved = task.saveTo;
     final seq = await _existingSeq(TransferKind.download, path,
-            localPath: resolved) ??
+            localPath: task.saveTo) ??
         await _queue.enqueue((seq) => TransferRecord(
               seq: seq,
               kind: TransferKind.download,
               path: path,
-              localPath: resolved,
+              localPath: task.saveTo,
               mimeType: null,
               metadata: null,
               multipartThreshold: null,
@@ -133,8 +133,9 @@ class TransferController {
               createdAt: DateTime.now(),
             ));
     _running.add(seq);
+    _wireResume(seq, TransferKind.download, path);
     _emit(TransferEventType.started, TransferKind.download, path);
-    _drive(seq, task.whenDone, TransferKind.download, path);
+    unawaited(_driveDownload(seq, path));
   }
 
   Future<void> _registerUpload(
@@ -144,7 +145,6 @@ class TransferController {
     Map<String, dynamic>? metadata,
     required int multipartThreshold,
     required bool pinned,
-    required Future<Object?> done,
   }) async {
     final seq =
         await _existingSeq(TransferKind.upload, path, localPath: localPath) ??
@@ -163,8 +163,9 @@ class TransferController {
                   pinned: pinned,
                 ));
     _running.add(seq);
+    _wireResume(seq, TransferKind.upload, path);
     _emit(TransferEventType.started, TransferKind.upload, path);
-    _drive(seq, done, TransferKind.upload, path);
+    unawaited(_driveUpload(seq, path));
   }
 
   /// Reuses the seq of an existing record for (kind, path), resetting it to
@@ -183,104 +184,209 @@ class TransferController {
     return null;
   }
 
-  void _removeActive(TransferKind kind, String path) {
-    if (kind == TransferKind.download) {
-      _activeDownloads.remove(path);
-    } else {
-      _activeUploads.remove(path);
-    }
-  }
-
-  /// Wires a task's completion to the persisted record [seq].
-  void _drive(int seq, Future<Object?> done, TransferKind kind, String path) {
-    done.then((result) async {
-      _running.remove(seq);
-      _removeActive(kind, path);
-      if (kind == TransferKind.upload && pinSink != null) {
-        final rec = await _queue.get(seq);
-        final data = result is FileSnapshot ? result.data : null;
-        if (rec != null && rec.pinned && data != null) {
-          try {
-            await pinSink!.finalizeUploadPin(path, data);
-          } catch (_) {
-            // pinning is best-effort; the upload still succeeded
-          }
-        }
-      }
-      await _queue.remove(seq);
-      _emit(TransferEventType.completed, kind, path);
-    }).catchError((Object e) async {
-      _running.remove(seq);
-      _removeActive(kind, path);
-      final rec = await _queue.get(seq);
-      if (rec == null) return;
-      final attempt = rec.attempt + 1;
-      await _queue.update(rec.copyWith(
-          status: TransferStatus.failed, attempt: attempt, lastError: '$e'));
-      _emit(TransferEventType.failed, kind, path, e);
-      if (attempt <= _retry.maxAttempts) _scheduleRetry(seq, attempt);
-    });
-  }
-
   Duration _backoff(int attempt) {
     final ms = _retry.baseDelay.inMilliseconds * (1 << (attempt - 1));
     final capped = ms.clamp(0, _retry.maxDelay.inMilliseconds);
     return Duration(milliseconds: capped);
   }
 
-  void _scheduleRetry(int seq, int attempt) {
-    Timer(_backoff(attempt), () => unawaited(_restart(seq)));
+  /// Wires the live handle's `onResume` so a paused tracked transfer re-enters
+  /// the controller's drive loop (instead of self-driving) when resumed.
+  void _wireResume(int seq, TransferKind kind, String path) {
+    void cb() {
+      if (_disposed || _running.contains(seq)) return;
+      _running.add(seq);
+      if (kind == TransferKind.upload) {
+        unawaited(_driveUpload(seq, path));
+      } else {
+        unawaited(_driveDownload(seq, path));
+      }
+    }
+
+    if (kind == TransferKind.upload) {
+      _activeUploads[path]?.onResume = cb;
+    } else {
+      _activeDownloads[path]?.onResume = cb;
+    }
   }
 
-  /// Recreates the task for a persisted record and re-drives it.
+  /// Runs one attempt of the stable upload handle for [seq]/[path], scheduling a
+  /// retry of the same handle on transient failure and finalizing on success.
+  Future<void> _driveUpload(int seq, String path) async {
+    final task = _activeUploads[path];
+    if (task == null) {
+      _running.remove(seq);
+      return;
+    }
+    try {
+      await task.runOnce();
+    } catch (e) {
+      // Transient failure — the handle is back to `queued`. (Pause/cancel make
+      // runOnce return normally, not throw, so they're handled below.)
+      if (task.state.status == UploadTaskStatus.cancelled ||
+          task.state.status == UploadTaskStatus.paused) {
+        _running.remove(seq);
+        return;
+      }
+      final rec = await _queue.get(seq);
+      if (rec == null) {
+        _running.remove(seq);
+        _activeUploads.remove(path);
+        return;
+      }
+      final attempt = rec.attempt + 1;
+      await _queue.update(rec.copyWith(
+          status: TransferStatus.failed, attempt: attempt, lastError: '$e'));
+      _emit(TransferEventType.failed, TransferKind.upload, path, e);
+      if (attempt > _retry.maxAttempts) {
+        _running.remove(seq);
+        _activeUploads.remove(path);
+        task.failPermanently(e);
+        task.whenDone.ignore(); // consume the error so it is not unhandled
+        return;
+      }
+      _emit(TransferEventType.retrying, TransferKind.upload, path);
+      _scheduleRetry(seq, attempt, TransferKind.upload, path);
+      return;
+    }
+    // runOnce returned without throwing: complete, paused, or cancelled.
+    switch (task.state.status) {
+      case UploadTaskStatus.complete:
+        // The task finalized any `pinned` cache copy itself (via onPinFinalize)
+        // before completing, so the pin is already committed here.
+        _running.remove(seq);
+        _activeUploads.remove(path);
+        await _queue.remove(seq);
+        _emit(TransferEventType.completed, TransferKind.upload, path);
+      case UploadTaskStatus.cancelled:
+        _running.remove(seq);
+        _activeUploads.remove(path);
+        await _queue.remove(seq);
+      default:
+        // paused — stop driving; resume() re-enters via onResume.
+        _running.remove(seq);
+    }
+  }
+
+  /// Download counterpart of [_driveUpload] (no pin step).
+  Future<void> _driveDownload(int seq, String path) async {
+    final task = _activeDownloads[path];
+    if (task == null) {
+      _running.remove(seq);
+      return;
+    }
+    try {
+      await task.runOnce();
+    } catch (e) {
+      if (task.state.status == DownloadTaskStatus.cancelled ||
+          task.state.status == DownloadTaskStatus.paused) {
+        _running.remove(seq);
+        return;
+      }
+      final rec = await _queue.get(seq);
+      if (rec == null) {
+        _running.remove(seq);
+        _activeDownloads.remove(path);
+        return;
+      }
+      final attempt = rec.attempt + 1;
+      await _queue.update(rec.copyWith(
+          status: TransferStatus.failed, attempt: attempt, lastError: '$e'));
+      _emit(TransferEventType.failed, TransferKind.download, path, e);
+      if (attempt > _retry.maxAttempts) {
+        _running.remove(seq);
+        _activeDownloads.remove(path);
+        task.failPermanently(e);
+        task.whenDone.ignore(); // consume the error so it is not unhandled
+        return;
+      }
+      _emit(TransferEventType.retrying, TransferKind.download, path);
+      _scheduleRetry(seq, attempt, TransferKind.download, path);
+      return;
+    }
+    // runOnce returned without throwing: complete, paused, or cancelled.
+    switch (task.state.status) {
+      case DownloadTaskStatus.complete:
+        _running.remove(seq);
+        _activeDownloads.remove(path);
+        await _queue.remove(seq);
+        _emit(TransferEventType.completed, TransferKind.download, path);
+      case DownloadTaskStatus.cancelled:
+        _running.remove(seq);
+        _activeDownloads.remove(path);
+        await _queue.remove(seq);
+      default:
+        // paused — stop driving; resume() re-enters via onResume.
+        _running.remove(seq);
+    }
+  }
+
+  void _scheduleRetry(int seq, int attempt, TransferKind kind, String path) {
+    Timer(_backoff(attempt), () {
+      if (_disposed) return;
+      if (kind == TransferKind.upload) {
+        unawaited(_driveUpload(seq, path));
+      } else {
+        unawaited(_driveDownload(seq, path));
+      }
+    });
+  }
+
+  /// Recreates a managed handle for a persisted record (if not already live) and
+  /// drives it. Used by rehydrate / resume / the retry backstop.
   Future<void> _restart(int seq) async {
     if (_disposed || _running.contains(seq)) return;
     final rec = await _queue.get(seq);
     if (rec == null) return;
-    _running.add(seq);
-    await _queue.update(rec.copyWith(status: TransferStatus.running));
-    _emit(TransferEventType.retrying, rec.kind, rec.path);
-
     final ref = _ref(rec.path);
     if (rec.kind == TransferKind.download) {
-      // Destination must still be known; if it's gone, drop the record.
       if (rec.localPath == null) {
-        _running.remove(seq);
         await _queue.remove(seq);
         return;
       }
-      final task = DownloadTask.start(
-        reference: ref,
-        saveTo: rec.localPath!,
-        maxRetries: 0,
-        httpClient: _httpClient,
-      );
+      final task = _activeDownloads[rec.path] ??
+          ManagedDownloadTask(
+            reference: ref,
+            saveTo: rec.localPath!,
+            httpClient: _httpClient,
+          );
       _activeDownloads[rec.path] = task;
-      _drive(seq, task.whenDone, TransferKind.download, rec.path);
+      _running.add(seq);
+      _wireResume(seq, TransferKind.download, rec.path);
+      await _queue.update(rec.copyWith(status: TransferStatus.running));
+      _emit(TransferEventType.retrying, TransferKind.download, rec.path);
+      unawaited(_driveDownload(seq, rec.path));
     } else {
-      // Pinned uploads prefer the staged copy (it survives the original file
-      // being moved/deleted); otherwise the source is the recorded local file.
       var source = rec.localPath;
       if (rec.pinned && pinSink != null) {
         final staged = await pinSink!.resolveStagedUpload(rec.path);
         if (staged != null) source = staged;
       }
       if (source == null) {
-        _running.remove(seq);
         await _queue.remove(seq);
         return;
       }
-      final task = UploadTask.start(
-        reference: ref,
-        localPath: source,
-        mimeType: rec.mimeType ?? 'application/octet-stream',
-        metadata: rec.metadata,
-        multipartThreshold: rec.multipartThreshold ?? _multipartThreshold,
-        maxRetries: 0,
-        httpClient: _httpClient,
-      );
+      final task = _activeUploads[rec.path] ??
+          ManagedUploadTask(
+            reference: ref,
+            localPath: source,
+            mimeType: rec.mimeType ?? 'application/octet-stream',
+            metadata: rec.metadata,
+            multipartThreshold: rec.multipartThreshold ?? _multipartThreshold,
+            httpClient: _httpClient,
+            // Resumed pinned upload: finalize from the staged copy (or record a
+            // deferred entry) within the task, before whenDone.
+            onPinFinalize: (rec.pinned && pinSink != null)
+                ? (confirmed) =>
+                    pinSink!.finalizeUploadPin(rec.path, confirmed)
+                : null,
+          );
       _activeUploads[rec.path] = task;
-      _drive(seq, task.whenDone, TransferKind.upload, rec.path);
+      _running.add(seq);
+      _wireResume(seq, TransferKind.upload, rec.path);
+      await _queue.update(rec.copyWith(status: TransferStatus.running));
+      _emit(TransferEventType.retrying, TransferKind.upload, rec.path);
+      unawaited(_driveUpload(seq, rec.path));
     }
   }
 
@@ -341,6 +447,11 @@ class TransferController {
     if (kind == null) return all;
     return [for (final r in all) if (r.kind == kind) r];
   }
+
+  /// The live tracked upload/download handle for [path], or null when none is in
+  /// flight. Lets a UI reattach to a transfer after a restart.
+  UploadTask? uploadFor(String path) => _activeUploads[path];
+  DownloadTask? downloadFor(String path) => _activeDownloads[path];
 
   /// Backstop: retry failed records still within the attempt cap.
   Future<void> retryFailed() async {

@@ -10,6 +10,7 @@ import '../models/file_data.dart';
 import '../models/upload_status.dart';
 
 enum UploadTaskStatus {
+  queued,
   running,
   paused,
   complete,
@@ -32,7 +33,7 @@ final class UploadTaskState {
       UploadTaskState(status: status, progress: newProgress);
 }
 
-final class UploadTask {
+abstract class UploadTask {
   final ChildReference reference;
   final String? localPath;
   final Uint8List? bytes;
@@ -53,8 +54,7 @@ final class UploadTask {
   final _taskCompleter = Completer<FileSnapshot?>();
 
   CancelToken? _cancelToken;
-  UploadTaskState _state =
-      const UploadTaskState(status: UploadTaskStatus.running, progress: 0.0);
+  UploadTaskState _state;
 
   UploadTaskState get state => _state;
   Stream<UploadTaskState> get stateStream => _stateController.stream;
@@ -65,18 +65,20 @@ final class UploadTask {
     this.localPath,
     this.bytes,
     required this.mimeType,
-    required this.metadata,
+    this.metadata,
     required this.multipartThreshold,
     required this.maxRetries,
     required this.retryBaseDelay,
     required Dio httpClient,
+    required UploadTaskStatus initialStatus,
     Future<String> Function()? stageSource,
     Future<void> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   })  : _httpClient = httpClient,
         _stageSource = stageSource,
         _onPinFinalize = onPinFinalize,
-        _onPinDeferred = onPinDeferred;
+        _onPinDeferred = onPinDeferred,
+        _state = UploadTaskState(status: initialStatus, progress: 0.0);
 
   /// Creates and immediately starts an [UploadTask] from a local file path.
   ///
@@ -101,7 +103,7 @@ final class UploadTask {
           validateStatus: (status) => status != null,
         ));
 
-    final task = UploadTask._(
+    final task = _DirectUploadTask._(
       reference: reference,
       localPath: localPath,
       mimeType: mimeType,
@@ -115,7 +117,7 @@ final class UploadTask {
       onPinDeferred: onPinDeferred,
     );
 
-    unawaited(task._run());
+    unawaited(task._runUnmanaged());
     return task;
   }
 
@@ -142,7 +144,7 @@ final class UploadTask {
           validateStatus: (status) => status != null,
         ));
 
-    final task = UploadTask._(
+    final task = _DirectUploadTask._(
       reference: reference,
       bytes: bytes,
       mimeType: mimeType,
@@ -156,134 +158,118 @@ final class UploadTask {
       onPinDeferred: onPinDeferred,
     );
 
-    unawaited(task._run());
+    unawaited(task._runUnmanaged());
     return task;
   }
 
-  Future<void> _run() async {
-    _setStatus(UploadTaskStatus.running);
-    _cancelToken = CancelToken();
-
-    try {
-      // Pin-on-upload: stage a safe local copy and upload *from* it, so the
-      // upload no longer depends on the caller's original file. Best-effort —
-      // on staging failure we upload from the original source and mark the pin
-      // deferred after confirm.
-      String? effPath = localPath;
-      Uint8List? effBytes = bytes;
-      if (_stageSource != null) {
-        if (_stagedPath == null) {
-          try {
-            _stagedPath = await _stageSource!();
-          } catch (_) {
-            _stagedPath = null; // fall back to the original source
-          }
-        }
-        if (_stagedPath != null) {
-          effPath = _stagedPath;
-          effBytes = null;
+  Future<FileData> _attemptOnce() async {
+    // Pin-on-upload: stage a safe local copy and upload *from* it, so the
+    // upload no longer depends on the caller's original file. Best-effort —
+    // on staging failure we upload from the original source and mark the pin
+    // deferred after confirm.
+    String? effPath = localPath;
+    Uint8List? effBytes = bytes;
+    if (_stageSource != null) {
+      if (_stagedPath == null) {
+        try {
+          _stagedPath = await _stageSource!();
+        } catch (_) {
+          _stagedPath = null; // fall back to the original source
         }
       }
-
-      final File? localFile;
-      final int sizeBytes;
-
-      if (effBytes != null) {
-        localFile = null;
-        sizeBytes = effBytes.length;
-      } else {
-        localFile = File(effPath!);
-        if (!await localFile.exists()) {
-          throw Exception('Local file not found at $effPath');
-        }
-        sizeBytes = (await localFile.stat()).size;
+      if (_stagedPath != null) {
+        effPath = _stagedPath;
+        effBytes = null;
       }
+    }
 
-      // Files at or below the threshold go through the backend's single-shot
-      // upload (`:upload`); larger files are split into multipart parts.
-      final isMultipart = sizeBytes > multipartThreshold;
+    final File? localFile;
+    final int sizeBytes;
 
-      var byteOffset = 0;
-      var partNumber = 1;
-
-      var existingRecord = await reference.api.getFile(reference.path);
-
-      if (existingRecord == null) {
-        existingRecord = await reference.api
-            .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
-      } else {
-        // A record matches the upload when both its declared size and MIME type
-        // are identical — only then can it be safely skipped or resumed.
-        final matches = existingRecord.sizeBytes == sizeBytes &&
-            existingRecord.mimeType == mimeType;
-
-        if (existingRecord.uploadStatus == UploadStatus.complete) {
-          if (matches) {
-            // Already uploaded identical content — nothing to do.
-            await _settlePin(existingRecord);
-            _setProgress(1.0);
-            _setStatus(UploadTaskStatus.complete);
-            _completeTask(existingRecord);
-            return;
-          }
-          // Overwrite the completed file with the new content.
-          existingRecord = await _replaceRecord(sizeBytes);
-        } else if (matches) {
-          // Resume the in-progress upload of the same content. Single-shot
-          // uploads can't be resumed mid-transfer, so only multipart consults
-          // the already-completed parts.
-          if (isMultipart) {
-            final parts = await reference.api.listParts(reference.path);
-            if (parts.isNotEmpty) {
-              byteOffset =
-                  parts.map((p) => p.size ?? 0).reduce((a, b) => a + b);
-              partNumber = parts.length + 1;
-            }
-          }
-        } else {
-          // An abandoned attempt for different content — discard it and start
-          // fresh so a prior failure doesn't poison this path.
-          existingRecord = await _replaceRecord(sizeBytes);
-        }
+    if (effBytes != null) {
+      localFile = null;
+      sizeBytes = effBytes.length;
+    } else {
+      localFile = File(effPath!);
+      if (!await localFile.exists()) {
+        throw Exception('Local file not found at $effPath');
       }
+      sizeBytes = (await localFile.stat()).size;
+    }
 
-      if (isMultipart) {
-        if (byteOffset > 0) _setProgress(byteOffset / sizeBytes);
+    // Files at or below the threshold go through the backend's single-shot
+    // upload (`:upload`); larger files are split into multipart parts.
+    final isMultipart = sizeBytes > multipartThreshold;
 
-        while (byteOffset < sizeBytes) {
-          final chunkSize =
-              (sizeBytes - byteOffset).clamp(0, multipartThreshold);
-          await _uploadPartWithRetry(
-            localFile: localFile,
-            bytes: effBytes,
-            partNumber: partNumber,
-            byteOffset: byteOffset,
-            chunkSize: chunkSize,
-            sizeBytes: sizeBytes,
-          );
-          byteOffset += chunkSize;
-          partNumber++;
+    var byteOffset = 0;
+    var partNumber = 1;
+
+    var existingRecord = await reference.api.getFile(reference.path);
+
+    if (existingRecord == null) {
+      existingRecord = await reference.api
+          .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
+    } else {
+      // A record matches the upload when both its declared size and MIME type
+      // are identical — only then can it be safely skipped or resumed.
+      final matches = existingRecord.sizeBytes == sizeBytes &&
+          existingRecord.mimeType == mimeType;
+
+      if (existingRecord.uploadStatus == UploadStatus.complete) {
+        if (matches) {
+          // Already uploaded identical content — nothing to do.
+          await _settlePin(existingRecord);
+          return existingRecord;
+        }
+        // Overwrite the completed file with the new content.
+        existingRecord = await _replaceRecord(sizeBytes);
+      } else if (matches) {
+        // Resume the in-progress upload of the same content. Single-shot
+        // uploads can't be resumed mid-transfer, so only multipart consults
+        // the already-completed parts.
+        if (isMultipart) {
+          final parts = await reference.api.listParts(reference.path);
+          if (parts.isNotEmpty) {
+            byteOffset =
+                parts.map((p) => p.size ?? 0).reduce((a, b) => a + b);
+            partNumber = parts.length + 1;
+          }
         }
       } else {
-        await _uploadWholeWithRetry(
+        // An abandoned attempt for different content — discard it and start
+        // fresh so a prior failure doesn't poison this path.
+        existingRecord = await _replaceRecord(sizeBytes);
+      }
+    }
+
+    if (isMultipart) {
+      if (byteOffset > 0) _setProgress(byteOffset / sizeBytes);
+
+      while (byteOffset < sizeBytes) {
+        final chunkSize =
+            (sizeBytes - byteOffset).clamp(0, multipartThreshold);
+        await _uploadPartWithRetry(
           localFile: localFile,
           bytes: effBytes,
+          partNumber: partNumber,
+          byteOffset: byteOffset,
+          chunkSize: chunkSize,
           sizeBytes: sizeBytes,
         );
+        byteOffset += chunkSize;
+        partNumber++;
       }
-
-      final confirmed = await reference.api.confirmUpload(reference.path);
-
-      await _settlePin(confirmed);
-      _setProgress(1.0);
-      _setStatus(UploadTaskStatus.complete);
-      _completeTask(confirmed);
-    } on DioException catch (e, st) {
-      if (e.type == DioExceptionType.cancel) return;
-      await _handleFailure(e, st);
-    } catch (e, st) {
-      await _handleFailure(e, st);
+    } else {
+      await _uploadWholeWithRetry(
+        localFile: localFile,
+        bytes: effBytes,
+        sizeBytes: sizeBytes,
+      );
     }
+
+    final confirmed = await reference.api.confirmUpload(reference.path);
+    await _settlePin(confirmed);
+    return confirmed;
   }
 
   /// Deletes any existing record/parts at the path and creates a fresh one for
@@ -412,13 +398,7 @@ final class UploadTask {
   }
 
   /// Resumes a paused upload.
-  void resume() {
-    if (_state.status != UploadTaskStatus.paused) {
-      throw StateError(
-          'Cannot resume: task is ${_state.status} (expected paused)');
-    }
-    unawaited(_run());
-  }
+  void resume();
 
   /// Cancels the upload, deletes the remote file, and clears the pending
   /// record. Returns a [Future] that resolves once cleanup is complete.
@@ -451,16 +431,17 @@ final class UploadTask {
     _closeStreams();
   }
 
-  /// Populates the offline cache for a pinned upload. Fully guarded: a caching
-  /// failure must never fail the upload. No-op when this isn't a pinned upload
-  /// (i.e. [_stageSource] is null) or when no settle hooks were supplied (the
-  /// controller path, which finalizes pins itself).
+  /// Populates the offline cache for a pinned upload by invoking the finalize
+  /// hook — which moves the staged copy into the id-keyed cache, or records a
+  /// deferred entry when no staged copy survives (e.g. a resumed transfer whose
+  /// staging was lost). Runs *before* the task completes, so `whenDone` resolves
+  /// only once the pin is committed. Fully guarded: a caching failure must never
+  /// fail the upload. No-op when no pin hooks were supplied (a non-pinned upload).
   Future<void> _settlePin(FileData confirmed) async {
-    if (_stageSource == null) return;
     final finalize = _onPinFinalize;
     final defer = _onPinDeferred;
     try {
-      if (_stagedPath != null && finalize != null) {
+      if (finalize != null) {
         await finalize(confirmed);
         return;
       }
@@ -500,5 +481,112 @@ final class UploadTask {
     if (_state.progress == clamped) return;
     _state = _state.withProgress(clamped);
     if (!_stateController.isClosed) _stateController.add(_state);
+  }
+}
+
+/// Private self-driving upload task. Starts immediately and retries via [_runUnmanaged].
+class _DirectUploadTask extends UploadTask {
+  _DirectUploadTask._({
+    required super.reference,
+    super.localPath,
+    super.bytes,
+    required super.mimeType,
+    required super.metadata,
+    required super.multipartThreshold,
+    required super.maxRetries,
+    required super.retryBaseDelay,
+    required super.httpClient,
+    super.stageSource,
+    super.onPinFinalize,
+    super.onPinDeferred,
+  }) : super._(initialStatus: UploadTaskStatus.running);
+
+  Future<void> _runUnmanaged() async {
+    _setStatus(UploadTaskStatus.running);
+    _cancelToken = CancelToken();
+    try {
+      final confirmed = await _attemptOnce();
+      _setProgress(1.0);
+      _setStatus(UploadTaskStatus.complete);
+      _completeTask(confirmed);
+    } on DioException catch (e, st) {
+      if (e.type == DioExceptionType.cancel) return;
+      await _handleFailure(e, st);
+    } catch (e, st) {
+      await _handleFailure(e, st);
+    }
+  }
+
+  @override
+  void resume() {
+    if (_state.status != UploadTaskStatus.paused) {
+      throw StateError(
+          'Cannot resume: task is ${_state.status} (expected paused)');
+    }
+    unawaited(_runUnmanaged());
+  }
+}
+
+/// Controller-driven upload task. Starts [UploadTaskStatus.queued] and does
+/// NOT auto-run. The controller drives attempts via [runOnce].
+class ManagedUploadTask extends UploadTask {
+  ManagedUploadTask({
+    required super.reference,
+    super.localPath,
+    super.bytes,
+    required super.mimeType,
+    super.metadata,
+    required super.multipartThreshold,
+    Dio? httpClient,
+    super.stageSource,
+    super.onPinFinalize,
+    super.onPinDeferred,
+  }) : super._(
+          maxRetries: 0,
+          retryBaseDelay: const Duration(seconds: 1),
+          httpClient: httpClient ??
+              Dio(BaseOptions(validateStatus: (status) => status != null)),
+          initialStatus: UploadTaskStatus.queued,
+        );
+
+  /// Invoked by [resume] so the controller re-drives the same handle.
+  /// Set by the controller.
+  void Function()? onResume;
+
+  /// One managed attempt: success completes the task; failure returns to
+  /// [UploadTaskStatus.queued] and rethrows without completing `whenDone`.
+  Future<void> runOnce() async {
+    _setStatus(UploadTaskStatus.running);
+    _cancelToken = CancelToken();
+    try {
+      final confirmed = await _attemptOnce();
+      _setProgress(1.0);
+      _setStatus(UploadTaskStatus.complete);
+      _completeTask(confirmed);
+    } catch (e) {
+      if (e is DioException && e.type == DioExceptionType.cancel) return;
+      _setStatus(UploadTaskStatus.queued);
+      rethrow;
+    }
+  }
+
+  /// Terminal failure (managed mode): retries exhausted / non-retryable. Sets
+  /// [UploadTaskStatus.failed] and errors `whenDone`.
+  void failPermanently(Object error, [StackTrace? st]) {
+    _setStatus(UploadTaskStatus.failed);
+    if (!_taskCompleter.isCompleted) {
+      _taskCompleter.completeError(error, st);
+    }
+    _closeStreams();
+  }
+
+  @override
+  void resume() {
+    if (_state.status != UploadTaskStatus.paused) {
+      throw StateError(
+          'Cannot resume: task is ${_state.status} (expected paused)');
+    }
+    _setStatus(UploadTaskStatus.queued);
+    onResume?.call();
   }
 }
