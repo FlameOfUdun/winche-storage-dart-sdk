@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:mime/mime.dart';
 
 import 'api/winche_storage_api.dart';
+import 'api/winche_storage_exception.dart';
+import 'directory_snapshot.dart';
 import 'file_snapshot.dart';
 import 'offline/catalog_entry.dart';
 import 'offline/offline_catalog.dart';
@@ -96,53 +98,111 @@ final class ChildReference {
 
   /// Lists the files in the directory at this reference's path.
   ///
-  /// Optionally filtered by [mimeType]. Returns a [FileSnapshot] per child file.
-  Future<List<FileSnapshot>> list({String? mimeType}) async {
-    final files = await api.listDirectory(path, mimeType: mimeType);
+  /// Optionally filtered by [mimeType]. Returns a [DirectorySnapshot] whose
+  /// `files` holds a [FileSnapshot] per child file.
+  ///
+  /// Remote-first: returns the authoritative server listing when reachable. When
+  /// the server is unreachable and offline cache is on, returns the locally
+  /// pinned files directly under this path with [DirectorySnapshot.fromCache]
+  /// true (a partial view). A server-unreachable error with no catalog rethrows.
+  Future<DirectorySnapshot> list({String? mimeType}) async {
     final timestamp = DateTime.now();
-
-    // Enrich each record with its offline state (localPath / isCached) from the
-    // local catalog, fetched once and indexed by path.
-    final entries = <String, CatalogEntry>{};
     final cat = catalog;
-    if (cat != null) {
-      for (final e in await cat.all()) {
-        entries[e.path] = e;
-      }
-    }
+    try {
+      final files = await api.listDirectory(path, mimeType: mimeType);
 
-    return files.map((file) {
-      final entry = entries[file.path];
-      final data = entry == null
-          ? file
-          : file.copyWith(localPath: entry.localPath, isCached: entry.isCached);
-      return FileSnapshot.fromData(
-        data,
-        timestamp: timestamp,
-        reference: ChildReference(
-          path: file.path,
-          api: api,
-          multipartThreshold: multipartThreshold,
-          directoryResolver: directoryResolver,
-          catalog: catalog,
-          controller: controller,
-        ),
+      // Enrich each record with its offline state (localPath / isCached) from
+      // the local catalog, fetched once and indexed by path.
+      final entries = <String, CatalogEntry>{};
+      if (cat != null) {
+        for (final e in await cat.all()) {
+          entries[e.path] = e;
+        }
+      }
+
+      final snapshots = files.map((file) {
+        final entry = entries[file.path];
+        final data = entry == null
+            ? file
+            : file.copyWith(
+                localPath: entry.localPath, isCached: entry.isCached);
+        return FileSnapshot.fromData(
+          data,
+          timestamp: timestamp,
+          reference: _childRef(file.path),
+        );
+      }).toList();
+
+      return DirectorySnapshot.fromFiles(snapshots,
+          reference: this, timestamp: timestamp, fromCache: false);
+    } on StorageUnavailableException {
+      // Offline: fall back to the pinned files directly under this path. With no
+      // catalog there's nothing to serve, so the error propagates.
+      if (cat == null) rethrow;
+      final snapshots = <FileSnapshot>[];
+      for (final e in await cat.all()) {
+        if (_parentDir(e.path) != path) continue;
+        if (mimeType != null && e.data.mimeType != mimeType) continue;
+        snapshots.add(FileSnapshot.fromCachedEntry(e,
+            reference: _childRef(e.path), timestamp: timestamp));
+      }
+      return DirectorySnapshot.fromFiles(snapshots,
+          reference: this, timestamp: timestamp, fromCache: true);
+    }
+  }
+
+  /// A reference to [fullPath] carrying this reference's configuration.
+  ChildReference _childRef(String fullPath) => ChildReference(
+        path: fullPath,
+        api: api,
+        multipartThreshold: multipartThreshold,
+        directoryResolver: directoryResolver,
+        catalog: catalog,
+        controller: controller,
       );
-    }).toList();
+
+  /// The parent directory of [p] (everything before the final `/`), or `''`
+  /// when [p] has no slash.
+  String _parentDir(String p) {
+    final i = p.lastIndexOf('/');
+    return i < 0 ? '' : p.substring(0, i);
+  }
+
+  /// Whether a pinned upload can populate the cache. Warns (debug only) and
+  /// returns false — the upload proceeds unpinned — when caching is disabled.
+  bool _ensurePinnable() {
+    if (catalog != null) return true;
+    assert(() {
+      // ignore: avoid_print
+      print('winche_storage: pinned upload ignored — enableOfflineCache is '
+          'off.');
+      return true;
+    }());
+    return false;
   }
 
   /// Uploads local file.
   ///
   /// [mimeType] is optional — when omitted it is inferred from [localPath]'s
   /// extension via the `mime` package, falling back to `application/octet-stream`.
+  ///
+  /// When [makeAvailableOffline] is true and `enableOfflineCache` is on, the
+  /// uploaded bytes are placed directly into the offline cache (no download
+  /// roundtrip): the source is staged, uploaded from the staged copy, then
+  /// moved to the id-keyed cache path on success. Caching is best-effort — if
+  /// it fails the upload still succeeds and the pin is recorded as stale for a
+  /// later `refresh`. Ignored (with a debug warning) when `enableOfflineCache`
+  /// is off.
   UploadTask uploadPath(
     String localPath, {
     String? mimeType,
     Map<String, dynamic>? metadata,
     int? multipartThreshold,
+    bool makeAvailableOffline = false,
   }) {
     final resolvedMime =
         mimeType ?? lookupMimeType(localPath) ?? 'application/octet-stream';
+    final wantPin = makeAvailableOffline && _ensurePinnable();
     if (controller != null) {
       return controller!.startUpload(
         this,
@@ -150,6 +210,7 @@ final class ChildReference {
         mimeType: resolvedMime,
         metadata: metadata,
         multipartThreshold: multipartThreshold ?? this.multipartThreshold,
+        pinned: wantPin,
       );
     }
     return UploadTask.start(
@@ -158,27 +219,44 @@ final class ChildReference {
       mimeType: resolvedMime,
       metadata: metadata,
       multipartThreshold: multipartThreshold ?? this.multipartThreshold,
+      stageSource:
+          wantPin ? () => catalog!.stageForUpload(this, sourcePath: localPath) : null,
+      onPinFinalize: wantPin ? (c) => catalog!.finalizePin(this, c) : null,
+      onPinDeferred: wantPin ? (c) => catalog!.markPinDeferred(this, c) : null,
     );
   }
 
   /// Uploads bytes.
   ///
   /// [mimeType] is required when uploading bytes, as it cannot be inferred.
+  ///
+  /// When [makeAvailableOffline] is true and `enableOfflineCache` is on, the
+  /// in-memory bytes are staged to disk first, then uploaded from the staged
+  /// copy and moved to the id-keyed cache path on success. Caching is
+  /// best-effort — if it fails the upload still succeeds and the pin is
+  /// recorded as stale for a later `refresh`. Ignored (with a debug warning)
+  /// when `enableOfflineCache` is off.
   UploadTask uploadBytes(
     Uint8List bytes,
     String mimeType, {
     Map<String, dynamic>? metadata,
     int? multipartThreshold,
+    bool makeAvailableOffline = false,
   }) {
     if (mimeType.isEmpty) {
       throw ArgumentError('mimeType is required when uploading bytes.');
     }
+    final wantPin = makeAvailableOffline && _ensurePinnable();
     return UploadTask.startFromBytes(
       reference: this,
       bytes: bytes,
       mimeType: mimeType,
       metadata: metadata,
       multipartThreshold: multipartThreshold ?? this.multipartThreshold,
+      stageSource:
+          wantPin ? () => catalog!.stageForUpload(this, bytes: bytes) : null,
+      onPinFinalize: wantPin ? (c) => catalog!.finalizePin(this, c) : null,
+      onPinDeferred: wantPin ? (c) => catalog!.markPinDeferred(this, c) : null,
     );
   }
 
@@ -230,6 +308,8 @@ final class ChildReference {
   }
 
   /// True when the pinned remote version has changed (or was deleted).
+  /// False when nothing is pinned, or when the server is unreachable (offline) —
+  /// staleness can't be confirmed, so the pinned copy is treated as current.
   /// Requires `enableOfflineCache`.
   Future<bool> isStale() {
     final c = catalog;

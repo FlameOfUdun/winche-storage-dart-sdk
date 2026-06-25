@@ -13,6 +13,7 @@ import 'src/offline/transfer_event.dart';
 
 export 'src/child_reference.dart' show ChildReference;
 export 'src/file_snapshot.dart' show FileSnapshot;
+export 'src/directory_snapshot.dart' show DirectorySnapshot;
 export 'src/models/file_data.dart' show FileData;
 export 'src/models/upload_session.dart' show UploadSession;
 export 'src/models/download_session.dart' show DownloadSession;
@@ -197,6 +198,9 @@ final class WincheStorage {
             controller: controller,
           )
         : null;
+    if (controller != null && catalog != null) {
+      controller.pinSink = catalog;
+    }
     return WincheStorage._(
       api: api,
       store: store,

@@ -33,4 +33,18 @@ void main() {
         localFilePath('${p.join('root', 'a')}/b', 'id', sourceName: 'x.png');
     expect(result, p.join('root', 'a', 'b', 'id.png'));
   });
+
+  test('stagingFilePath is under .staging, hashed, and extension-free', () {
+    final a = stagingFilePath('/cache', 'a/b.png');
+    expect(p.split(a), containsAllInOrder(['.staging']));
+    expect(p.basename(a), isNot(contains('.'))); // no extension
+    expect(a, p.normalize(a));
+  });
+
+  test('stagingFilePath is deterministic and unique per ref path', () {
+    expect(stagingFilePath('/cache', 'a/b.png'),
+        stagingFilePath('/cache', 'a/b.png'));
+    expect(stagingFilePath('/cache', 'a/b.png'),
+        isNot(stagingFilePath('/cache', 'a/c.png')));
+  });
 }

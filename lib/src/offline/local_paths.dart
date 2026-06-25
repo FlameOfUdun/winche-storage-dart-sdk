@@ -51,3 +51,22 @@ String localFilePath(
     p.normalize(
       p.join(directory, localFileName(id, sourceName: sourceName, mimeType: mimeType)),
     );
+
+/// A deterministic FNV-1a (32-bit) hash of [s], rendered as 8 hex chars.
+/// Dart's `String.hashCode` is not guaranteed stable across runs, so a resumed
+/// upload could not recompute a `hashCode`-based path — this can.
+String _stableHash(String s) {
+  var hash = 0x811c9dc5; // FNV offset basis
+  for (final unit in s.codeUnits) {
+    hash ^= unit & 0xff;
+    hash = (hash * 0x01000193) & 0xffffffff; // FNV prime, kept to 32 bits
+  }
+  return hash.toRadixString(16).padLeft(8, '0');
+}
+
+/// The staging path for an in-progress pinned upload of [refPath]. Lives under a
+/// `.staging/` subdir of [directory], keyed by a stable hash of [refPath] (unique
+/// per upload target) and intentionally extension-free. Deterministic, so a
+/// resumed upload recomputes the same path.
+String stagingFilePath(String directory, String refPath) =>
+    p.normalize(p.join(directory, '.staging', _stableHash(refPath)));

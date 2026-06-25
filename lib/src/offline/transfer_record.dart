@@ -19,6 +19,7 @@ class TransferRecord {
   final int attempt;
   final String? lastError;
   final DateTime createdAt;
+  final bool pinned;
 
   const TransferRecord({
     required this.seq,
@@ -32,6 +33,7 @@ class TransferRecord {
     required this.attempt,
     required this.lastError,
     required this.createdAt,
+    this.pinned = false,
   });
 
   TransferRecord copyWith({
@@ -39,6 +41,7 @@ class TransferRecord {
     TransferStatus? status,
     int? attempt,
     String? lastError,
+    bool? pinned,
   }) =>
       TransferRecord(
         seq: seq,
@@ -52,6 +55,7 @@ class TransferRecord {
         attempt: attempt ?? this.attempt,
         lastError: lastError,
         createdAt: createdAt,
+        pinned: pinned ?? this.pinned,
       );
 
   Map<String, Object?> toJson() => {
@@ -66,6 +70,7 @@ class TransferRecord {
         'attempt': attempt,
         'lastError': lastError,
         'createdAt': createdAt.toIso8601String(),
+        'pinned': pinned,
       };
 
   factory TransferRecord.fromJson(Map<String, Object?> json) => TransferRecord(
@@ -82,5 +87,6 @@ class TransferRecord {
         attempt: json['attempt'] as int,
         lastError: json['lastError'] as String?,
         createdAt: DateTime.parse(json['createdAt'] as String),
+        pinned: json['pinned'] as bool? ?? false,
       );
 }

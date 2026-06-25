@@ -42,6 +42,12 @@ final class UploadTask {
   final int maxRetries;
   final Duration retryBaseDelay;
   final Dio _httpClient;
+  final Future<String> Function()? _stageSource;
+  final Future<void> Function(FileData confirmed)? _onPinFinalize;
+  final Future<void> Function(FileData confirmed)? _onPinDeferred;
+
+  /// Set once a stage succeeds; guards against re-staging on pause/resume.
+  String? _stagedPath;
 
   final _stateController = StreamController<UploadTaskState>.broadcast();
   final _taskCompleter = Completer<FileSnapshot?>();
@@ -64,7 +70,13 @@ final class UploadTask {
     required this.maxRetries,
     required this.retryBaseDelay,
     required Dio httpClient,
-  }) : _httpClient = httpClient;
+    Future<String> Function()? stageSource,
+    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<void> Function(FileData confirmed)? onPinDeferred,
+  })  : _httpClient = httpClient,
+        _stageSource = stageSource,
+        _onPinFinalize = onPinFinalize,
+        _onPinDeferred = onPinDeferred;
 
   /// Creates and immediately starts an [UploadTask] from a local file path.
   ///
@@ -80,6 +92,9 @@ final class UploadTask {
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
+    Future<String> Function()? stageSource,
+    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
     final client = httpClient ??
         Dio(BaseOptions(
@@ -95,6 +110,9 @@ final class UploadTask {
       maxRetries: maxRetries,
       retryBaseDelay: retryBaseDelay,
       httpClient: client,
+      stageSource: stageSource,
+      onPinFinalize: onPinFinalize,
+      onPinDeferred: onPinDeferred,
     );
 
     unawaited(task._run());
@@ -115,6 +133,9 @@ final class UploadTask {
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
+    Future<String> Function()? stageSource,
+    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
     final client = httpClient ??
         Dio(BaseOptions(
@@ -130,6 +151,9 @@ final class UploadTask {
       maxRetries: maxRetries,
       retryBaseDelay: retryBaseDelay,
       httpClient: client,
+      stageSource: stageSource,
+      onPinFinalize: onPinFinalize,
+      onPinDeferred: onPinDeferred,
     );
 
     unawaited(task._run());
@@ -141,16 +165,36 @@ final class UploadTask {
     _cancelToken = CancelToken();
 
     try {
+      // Pin-on-upload: stage a safe local copy and upload *from* it, so the
+      // upload no longer depends on the caller's original file. Best-effort —
+      // on staging failure we upload from the original source and mark the pin
+      // deferred after confirm.
+      String? effPath = localPath;
+      Uint8List? effBytes = bytes;
+      if (_stageSource != null) {
+        if (_stagedPath == null) {
+          try {
+            _stagedPath = await _stageSource!();
+          } catch (_) {
+            _stagedPath = null; // fall back to the original source
+          }
+        }
+        if (_stagedPath != null) {
+          effPath = _stagedPath;
+          effBytes = null;
+        }
+      }
+
       final File? localFile;
       final int sizeBytes;
 
-      if (bytes != null) {
+      if (effBytes != null) {
         localFile = null;
-        sizeBytes = bytes!.length;
+        sizeBytes = effBytes.length;
       } else {
-        localFile = File(localPath!);
+        localFile = File(effPath!);
         if (!await localFile.exists()) {
-          throw Exception('Local file not found at $localPath');
+          throw Exception('Local file not found at $effPath');
         }
         sizeBytes = (await localFile.stat()).size;
       }
@@ -176,6 +220,7 @@ final class UploadTask {
         if (existingRecord.uploadStatus == UploadStatus.complete) {
           if (matches) {
             // Already uploaded identical content — nothing to do.
+            await _settlePin(existingRecord);
             _setProgress(1.0);
             _setStatus(UploadTaskStatus.complete);
             _completeTask(existingRecord);
@@ -210,7 +255,7 @@ final class UploadTask {
               (sizeBytes - byteOffset).clamp(0, multipartThreshold);
           await _uploadPartWithRetry(
             localFile: localFile,
-            bytes: bytes,
+            bytes: effBytes,
             partNumber: partNumber,
             byteOffset: byteOffset,
             chunkSize: chunkSize,
@@ -222,13 +267,14 @@ final class UploadTask {
       } else {
         await _uploadWholeWithRetry(
           localFile: localFile,
-          bytes: bytes,
+          bytes: effBytes,
           sizeBytes: sizeBytes,
         );
       }
 
       final confirmed = await reference.api.confirmUpload(reference.path);
 
+      await _settlePin(confirmed);
       _setProgress(1.0);
       _setStatus(UploadTaskStatus.complete);
       _completeTask(confirmed);
@@ -403,6 +449,31 @@ final class UploadTask {
       _taskCompleter.completeError(e, st);
     }
     _closeStreams();
+  }
+
+  /// Populates the offline cache for a pinned upload. Fully guarded: a caching
+  /// failure must never fail the upload. No-op when this isn't a pinned upload
+  /// (i.e. [_stageSource] is null) or when no settle hooks were supplied (the
+  /// controller path, which finalizes pins itself).
+  Future<void> _settlePin(FileData confirmed) async {
+    if (_stageSource == null) return;
+    final finalize = _onPinFinalize;
+    final defer = _onPinDeferred;
+    try {
+      if (_stagedPath != null && finalize != null) {
+        await finalize(confirmed);
+        return;
+      }
+    } catch (_) {
+      // fall through to the deferred path
+    }
+    if (defer != null) {
+      try {
+        await defer(confirmed);
+      } catch (_) {
+        // best-effort; nothing more we can do
+      }
+    }
   }
 
   void _completeTask(FileData? record) {

@@ -199,7 +199,7 @@ class _HomePageState extends State<_HomePage> {
                     child: Text('Error loading files: ${snapshot.error}'),
                   );
                 }
-                final files = snapshot.data ?? [];
+                final files = snapshot.data?.files ?? const [];
                 if (files.isEmpty) {
                   return const Center(child: Text('No files found'));
                 }

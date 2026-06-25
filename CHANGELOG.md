@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 3.0.0
+
+* **Breaking:** `ChildReference.list()` now returns a `DirectorySnapshot` instead
+  of `List<FileSnapshot>`. Read the files via `.files`. The snapshot adds
+  directory-level metadata (`fromCache`, `name`, `length`, `isEmpty`).
+* `list()` is now offline-aware: when the server is unreachable it returns the
+  locally pinned files directly under the path with `fromCache: true` (a partial,
+  pinned-only view) instead of throwing. With offline cache off it still throws.
+* Upload-time pinning: `uploadPath` / `uploadBytes` accept
+  `makeAvailableOffline: true` to place the uploaded bytes straight into the
+  offline cache — no download roundtrip. Best-effort: a caching failure leaves
+  the upload successful and records a stale pin for a later `refresh()`.
+* `isStale()` now returns `false` when the server is unreachable (offline) rather
+  than throwing; other API errors still propagate.
+
+## 2.0.0
+
+* Added the opt-in **offline cache**: pin files for offline use, remote-first
+  reads with a local cache fallback, and on-demand freshness checks.
+* Added the opt-in **auto-resume** layer: a durable transfer queue that survives
+  app restarts and self-retries failed transfers with exponential backoff.
+
 ## 1.1.0
 
 * Uploading to an existing path now overwrites a completed file when the size or

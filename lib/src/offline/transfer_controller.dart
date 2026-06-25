@@ -4,12 +4,14 @@ import 'package:dio/dio.dart';
 
 import '../api/winche_storage_api.dart';
 import '../child_reference.dart';
+import '../file_snapshot.dart';
 import '../tasks/download_task.dart';
 import '../tasks/upload_task.dart';
 import 'storage_local_store.dart';
 import 'transfer_event.dart';
 import 'transfer_queue.dart';
 import 'transfer_record.dart';
+import 'upload_pin_sink.dart';
 
 export 'transfer_event.dart' show TransferRetryConfig;
 
@@ -51,6 +53,10 @@ class TransferController {
   Timer? _poll;
   bool _disposed = false;
 
+  /// Set by the facade after construction (the catalog is built later). Enables
+  /// finalizing pinned uploads on completion. Null when offline cache is off.
+  UploadPinSink? pinSink;
+
   Stream<TransferEvent> get events => _events.stream;
 
   ChildReference _ref(String path) => ChildReference(
@@ -80,9 +86,11 @@ class TransferController {
     required String mimeType,
     Map<String, dynamic>? metadata,
     required int multipartThreshold,
+    bool pinned = false,
   }) {
     final existing = _activeUploads[ref.path];
     if (existing != null) return existing;
+    final sink = pinned ? pinSink : null;
     final task = UploadTask.start(
       reference: ref,
       localPath: localPath,
@@ -91,6 +99,8 @@ class TransferController {
       multipartThreshold: multipartThreshold,
       maxRetries: 0,
       httpClient: _httpClient,
+      stageSource:
+          sink == null ? null : () => sink.stageUpload(ref.path, localPath),
     );
     _activeUploads[ref.path] = task;
     unawaited(_registerUpload(
@@ -99,6 +109,7 @@ class TransferController {
       mimeType: mimeType,
       metadata: metadata,
       multipartThreshold: multipartThreshold,
+      pinned: pinned,
       done: task.whenDone,
     ));
     return task;
@@ -132,6 +143,7 @@ class TransferController {
     required String mimeType,
     Map<String, dynamic>? metadata,
     required int multipartThreshold,
+    required bool pinned,
     required Future<Object?> done,
   }) async {
     final seq =
@@ -148,6 +160,7 @@ class TransferController {
                   attempt: 0,
                   lastError: null,
                   createdAt: DateTime.now(),
+                  pinned: pinned,
                 ));
     _running.add(seq);
     _emit(TransferEventType.started, TransferKind.upload, path);
@@ -180,9 +193,20 @@ class TransferController {
 
   /// Wires a task's completion to the persisted record [seq].
   void _drive(int seq, Future<Object?> done, TransferKind kind, String path) {
-    done.then((_) async {
+    done.then((result) async {
       _running.remove(seq);
       _removeActive(kind, path);
+      if (kind == TransferKind.upload && pinSink != null) {
+        final rec = await _queue.get(seq);
+        final data = result is FileSnapshot ? result.data : null;
+        if (rec != null && rec.pinned && data != null) {
+          try {
+            await pinSink!.finalizeUploadPin(path, data);
+          } catch (_) {
+            // pinning is best-effort; the upload still succeeded
+          }
+        }
+      }
       await _queue.remove(seq);
       _emit(TransferEventType.completed, kind, path);
     }).catchError((Object e) async {
@@ -234,15 +258,21 @@ class TransferController {
       _activeDownloads[rec.path] = task;
       _drive(seq, task.whenDone, TransferKind.download, rec.path);
     } else {
-      // Upload: the source file must still exist; if it's gone, drop the record.
-      if (rec.localPath == null) {
+      // Pinned uploads prefer the staged copy (it survives the original file
+      // being moved/deleted); otherwise the source is the recorded local file.
+      var source = rec.localPath;
+      if (rec.pinned && pinSink != null) {
+        final staged = await pinSink!.resolveStagedUpload(rec.path);
+        if (staged != null) source = staged;
+      }
+      if (source == null) {
         _running.remove(seq);
         await _queue.remove(seq);
         return;
       }
       final task = UploadTask.start(
         reference: ref,
-        localPath: rec.localPath!,
+        localPath: source,
         mimeType: rec.mimeType ?? 'application/octet-stream',
         metadata: rec.metadata,
         multipartThreshold: rec.multipartThreshold ?? _multipartThreshold,

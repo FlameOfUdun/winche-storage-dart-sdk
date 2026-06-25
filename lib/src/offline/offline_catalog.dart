@@ -1,18 +1,22 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
 import '../api/winche_storage_api.dart';
+import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
+import '../models/file_data.dart';
 import '../tasks/download_task.dart';
 import 'catalog_entry.dart';
 import 'local_paths.dart';
 import 'storage_local_store.dart';
 import 'transfer_controller.dart';
+import 'upload_pin_sink.dart';
 
 /// Tracks files pinned for offline availability. Owns an id-keyed cache
 /// directory rooted at [_directoryResolver]; files live at `<dir>/<id><.ext>`.
-class OfflineCatalog {
+class OfflineCatalog implements UploadPinSink {
   OfflineCatalog({
     required WincheStorageApi api,
     required StorageLocalStore store,
@@ -102,11 +106,18 @@ class OfflineCatalog {
   }
 
   /// True when the pinned file's remote version has changed (or it was deleted).
-  /// False when nothing is pinned at [path].
+  /// False when nothing is pinned at [path], or when the server is unreachable
+  /// (offline): staleness can't be confirmed, so the pinned copy is treated as
+  /// current rather than surfacing an error. Other API errors still propagate.
   Future<bool> isStale(String path) async {
     final entry = await entryFor(path);
     if (entry == null) return false;
-    final remote = await _api.getFile(path);
+    final FileData? remote;
+    try {
+      remote = await _api.getFile(path);
+    } on StorageUnavailableException {
+      return false; // offline — can't compare; assume the cached copy is current
+    }
     if (remote == null) return true;
     return remote.version != entry.data.version ||
         remote.updatedAt != entry.data.updatedAt ||
@@ -131,6 +142,108 @@ class OfflineCatalog {
     for (final entry in await all()) {
       await evict(entry.path);
     }
+  }
+
+  Future<String> _requireDir() async {
+    final resolver = _directoryResolver;
+    if (resolver == null) {
+      throw StateError(
+          'directoryResolver is required to store files for offline use.');
+    }
+    return resolver();
+  }
+
+  /// Copies/writes the upload source into the staging area and returns the
+  /// staged path. Throws on any I/O error so the caller can fall back to a
+  /// deferred (stale) pin. Provide exactly one of [sourcePath] or [bytes].
+  Future<String> stageForUpload(
+    ChildReference ref, {
+    String? sourcePath,
+    Uint8List? bytes,
+  }) async {
+    final dir = await _requireDir();
+    final staging = stagingFilePath(dir, ref.path);
+    final file = File(staging);
+    await file.parent.create(recursive: true);
+
+    final int expected;
+    if (bytes != null) {
+      await file.writeAsBytes(bytes, flush: true);
+      expected = bytes.length;
+    } else {
+      await File(sourcePath!).copy(staging);
+      expected = await File(sourcePath).length();
+    }
+
+    final actual = await file.length();
+    if (actual != expected) {
+      throw StateError('Staged copy size mismatch ($actual != $expected).');
+    }
+    return staging;
+  }
+
+  // ── UploadPinSink implementation ──────────────────────────────────────────
+
+  ChildReference _refFor(String path) =>
+      ChildReference(path: path, api: _api, directoryResolver: _directoryResolver);
+
+  @override
+  Future<String> stageUpload(String path, String sourceLocalPath) =>
+      stageForUpload(_refFor(path), sourcePath: sourceLocalPath);
+
+  @override
+  Future<String?> resolveStagedUpload(String path) async {
+    final dir = await _requireDir();
+    final staging = stagingFilePath(dir, path);
+    return await File(staging).exists() ? staging : null;
+  }
+
+  @override
+  Future<void> finalizeUploadPin(String path, FileData confirmed) =>
+      finalizePin(_refFor(path), confirmed);
+
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Finalizes a pinned upload: moves the staged copy to the id-keyed cache path
+  /// and records a `ready` entry. Idempotent — if the final file already exists
+  /// it just (re)writes the entry. Falls back to a `stale` entry (a later
+  /// [refresh] fills it in) when neither a staged nor a final file is present.
+  Future<void> finalizePin(ChildReference ref, FileData confirmed) async {
+    final dir = await _requireDir();
+    final staging = stagingFilePath(dir, ref.path);
+    final finalPath = localFilePath(dir, confirmed.id,
+        sourceName: ref.name, mimeType: confirmed.mimeType);
+    final stagedFile = File(staging);
+    final finalFile = File(finalPath);
+
+    if (await stagedFile.exists()) {
+      if (await finalFile.exists()) await finalFile.delete();
+      await stagedFile.rename(finalPath);
+    } else if (!await finalFile.exists()) {
+      await markPinDeferred(ref, confirmed);
+      return;
+    }
+
+    await _put(CatalogEntry(
+      data: confirmed,
+      localPath: finalPath,
+      pinnedAt: DateTime.now(),
+      status: CatalogStatus.ready,
+    ));
+  }
+
+  /// Records a `stale` entry for a pin that could not be populated from the
+  /// upload source. A later [refresh]/[pin] downloads it and flips it to ready.
+  Future<void> markPinDeferred(ChildReference ref, FileData confirmed) async {
+    final dir = await _requireDir();
+    final finalPath = localFilePath(dir, confirmed.id,
+        sourceName: ref.name, mimeType: confirmed.mimeType);
+    await _put(CatalogEntry(
+      data: confirmed,
+      localPath: finalPath,
+      pinnedAt: DateTime.now(),
+      status: CatalogStatus.stale,
+    ));
   }
 
   Future<void> _put(CatalogEntry entry) =>

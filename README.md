@@ -8,8 +8,9 @@ Dart SDK for the WincheStorage file management backend. Provides resumable, mult
 - Resumable, multipart-aware uploads from a file path or raw bytes.
 - Resumable downloads with HTTP `Range` support.
 - Pause / resume / cancel on both upload and download tasks, with progress streams.
-- **Offline cache (opt-in):** pin files for offline use, query them, and read
-  them back even when the server is unreachable. On-demand freshness checks.
+- **Offline cache (opt-in):** pin files for offline use — on upload (no download
+  roundtrip) or after — query them, and read them back even when the server is
+  unreachable. On-demand freshness checks.
 - **Auto-resume (opt-in):** a durable transfer queue that survives app restarts
   and self-retries with backoff. Resume all uploads/downloads, or one by path.
 - Pure Dart — no Flutter dependency. Persistence via [`sembast`](https://pub.dev/packages/sembast)
@@ -148,6 +149,25 @@ are uploaded in parts.
 > `uploadBytes` keeps its in-session retry but is **not** rehydrated after a kill
 > (the bytes live only in memory).
 
+#### Make available offline while uploading
+
+When `enableOfflineCache` is on, pass `makeAvailableOffline: true` to place the
+uploaded bytes **straight into the offline cache** — no separate download. The
+source is staged, uploaded from that staged copy, then moved into the id-keyed
+cache on success. Caching is best-effort: if it fails the upload still succeeds
+and the pin is recorded as stale for a later `refresh()`. Ignored (with a debug
+warning) when `enableOfflineCache` is off. Works for both `uploadPath` and
+`uploadBytes`, including auto-resumed uploads.
+
+```dart
+final task = photoRef.uploadPath('/local/path/photo.jpg', makeAvailableOffline: true);
+await task.whenDone; // uploaded AND available offline — no download roundtrip
+```
+
+This is the upload-time counterpart to [`makeAvailableOffline()`](#offline-cache):
+same result, but it reuses the bytes you already have on disk instead of
+downloading them back.
+
 ### Download
 
 `download` writes the file's bytes to an explicit path. For a managed,
@@ -187,11 +207,18 @@ task.cancel();
 Requires `enableOfflineCache: true`. Pin a file to download it into a managed,
 id-keyed cache directory and track it so it stays available offline.
 
+> If you're the one uploading the file, prefer
+> `uploadPath(..., makeAvailableOffline: true)` (see [Upload](#upload)) — it
+> populates the cache from the bytes you already have, skipping the download this
+> method would otherwise perform.
+
 ```dart
 // Download + pin for offline use. Completes when the file is on disk.
 await photoRef.makeAvailableOffline();
 
 // Has the remote version changed since it was pinned? (version/updatedAt/size)
+// Returns false when offline (server unreachable) — staleness can't be
+// confirmed, so the pinned copy is treated as current.
 final bool stale = await photoRef.isStale();
 if (stale) {
   await photoRef.refresh(); // re-download the current remote version
@@ -226,14 +253,25 @@ if (snap.exists) {
 }
 ```
 
-`list()` populates `data.isCached` / `data.localPath` for every file too (from a
-single local-catalog lookup), so you can render "downloaded" state directly:
+`list()` returns a `DirectorySnapshot` and populates `data.isCached` /
+`data.localPath` for every file too (from a single local-catalog lookup), so you
+can render "downloaded" state directly:
 
 ```dart
-for (final snap in await userRoot.list()) {
+final dir = await userRoot.list();
+for (final snap in dir.files) {
   final badge = snap.data!.isCached ? '✓ offline' : '';
   print('${snap.reference.path} $badge');
 }
+```
+
+When the server is unreachable, `list()` falls back to the **locally pinned**
+files directly under the path and sets `dir.fromCache == true` — a partial view,
+not the full directory. (With offline cache off, it throws instead.)
+
+```dart
+final dir = await userRoot.list();
+if (dir.fromCache) print('offline — showing ${dir.length} downloaded file(s) only');
 ```
 
 > `fromCache` describes how the **metadata** was obtained (server vs. local
@@ -277,11 +315,12 @@ an auto-resumed transfer. Per-byte progress stays on the returned task's
 ### List a directory
 
 ```dart
-final List<FileSnapshot> files = await storage.child('userFiles/user-123').list(
+final DirectorySnapshot dir = await storage.child('userFiles/user-123').list(
   mimeType: 'image/jpeg', // optional filter
 );
 
-for (final snapshot in files) {
+if (dir.fromCache) print('offline — partial (pinned-only) listing');
+for (final snapshot in dir.files) {
   print('${snapshot.reference.path} — ${snapshot.data?.sizeBytes} bytes');
 }
 ```
@@ -359,9 +398,9 @@ final bool deleted = await photoRef.delete(); // false if the file didn't exist
 | `parent` | The parent reference, or `null` at a single-segment path. |
 | `child(path)` | Returns a new `ChildReference` at `this.path/path`. |
 | `get()` | Fetches metadata. Remote-first with cache fallback (see Offline cache). |
-| `list({mimeType})` | Lists files under this path, returning `List<FileSnapshot>`. |
-| `uploadPath(localPath, {mimeType, metadata, multipartThreshold})` | Starts an `UploadTask` from a local file. |
-| `uploadBytes(bytes, mimeType, {metadata, multipartThreshold})` | Starts an `UploadTask` from raw bytes. |
+| `list({mimeType})` | Lists files under this path, returning a `DirectorySnapshot` (its `.files` holds a `FileSnapshot` each). Remote-first; offline it returns the pinned subset with `fromCache: true`. |
+| `uploadPath(localPath, {mimeType, metadata, multipartThreshold, makeAvailableOffline})` | Starts an `UploadTask` from a local file. `makeAvailableOffline: true` also pins it into the offline cache with no download roundtrip (requires `enableOfflineCache`). |
+| `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, makeAvailableOffline})` | Starts an `UploadTask` from raw bytes. `makeAvailableOffline: true` also pins it into the offline cache (requires `enableOfflineCache`). |
 | `download(saveTo)` | Starts a `DownloadTask` writing the file to the explicit path `saveTo`. |
 | `makeAvailableOffline()` | Pins + downloads the file for offline use. Requires `enableOfflineCache`. |
 | `refresh()` | Re-downloads the current remote version into the cache. Requires `enableOfflineCache`. |
@@ -421,6 +460,19 @@ client-side offline fields:
 | --- | --- | --- |
 | `localPath` | `String?` | Absolute path to the local copy, when pinned/registered. |
 | `isCached` | `bool` | True when the content is fully downloaded locally and ready for offline use. |
+
+### `DirectorySnapshot`
+
+An immutable snapshot of a directory listing, returned by `list()`.
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `files` | `List<FileSnapshot>` | One snapshot per child file (unmodifiable). |
+| `fromCache` | `bool` | True when the listing was served from the local catalog because the server was unreachable — a partial, pinned-only view. |
+| `reference` | `ChildReference` | The directory this snapshot lists. |
+| `name` | `String` | The directory's last path segment. |
+| `length` / `isEmpty` / `isNotEmpty` | — | Convenience over `files`. |
+| `timestamp` | `DateTime` | When the snapshot was taken. |
 
 ### Offline / auto-resume types
 

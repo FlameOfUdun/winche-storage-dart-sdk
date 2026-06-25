@@ -49,4 +49,25 @@ void main() {
     expect(failed.lastError, 'boom');
     expect(failed.seq, 1);
   });
+
+  test('pinned round-trips through JSON and defaults to false', () {
+    final rec = TransferRecord(
+      seq: 1,
+      kind: TransferKind.upload,
+      path: 'a/b.png',
+      localPath: '/src',
+      mimeType: 'image/png',
+      metadata: null,
+      multipartThreshold: null,
+      status: TransferStatus.running,
+      attempt: 0,
+      lastError: null,
+      createdAt: DateTime.utc(2026, 1, 1),
+      pinned: true,
+    );
+    expect(TransferRecord.fromJson(rec.toJson()).pinned, isTrue);
+
+    final legacy = Map<String, Object?>.from(rec.toJson())..remove('pinned');
+    expect(TransferRecord.fromJson(legacy).pinned, isFalse);
+  });
 }
