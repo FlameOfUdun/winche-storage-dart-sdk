@@ -1,9 +1,14 @@
 # Files excluded from the published pub.dev archive.
 #
 # NOTE: where a .pubignore exists, pub uses it *instead of* the .gitignore in
-# the same directory. So this file must repeat everything the root .gitignore
-# excludes — otherwise build output, IDE files and the lockfile would start
-# shipping. (.gitignore files in subdirectories, e.g. example/, still apply.)
+# the same directory, so the root .gitignore's rules are repeated below.
+# (.gitignore files in subdirectories, e.g. example/, still apply.)
+#
+# Measured, not assumed: with only the `docs/` rule below, the single extra file
+# that ships is winche_storage.iml. pub excludes .dart_tool/, /build/,
+# /coverage/ and pubspec.lock by its own built-in rules either way. The mirrored
+# block is therefore belt-and-braces — keep it so a new root .gitignore entry
+# doesn't silently start shipping, but don't expect it to be load-bearing.
 
 # ── Not for consumers ───────────────────────────────────────────────────────
 # Design specs and implementation plans: internal working documents, and about
