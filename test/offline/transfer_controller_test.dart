@@ -55,7 +55,7 @@ void main() {
 
     final all = await TransferQueue(store).all();
     expect(all.where((r) => r.path == 'a/b.png').length, 1);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 
   test('a failing download is recorded as failed', () async {
@@ -74,7 +74,7 @@ void main() {
     final all = await q.all();
     expect(all.single.kind, TransferKind.download);
     expect(all.single.status, TransferStatus.failed);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 
   test('removePath drops persisted transfer records for that path', () async {
@@ -101,7 +101,7 @@ void main() {
 
     final all = await q.all();
     expect(all.map((r) => r.path), ['other.png']);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 
   test('pendingTransfers returns the queue, filterable by kind', () async {
@@ -132,7 +132,7 @@ void main() {
         (await ctrl.pendingTransfers(kind: TransferKind.upload))
             .map((r) => r.path),
         ['up.png']);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 
   test('rehydrate restarts persisted records', () async {
@@ -158,6 +158,6 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 100));
 
     expect(api.calls, greaterThan(0));
-    await ctrl.dispose();
+    await ctrl.close();
   });
 }

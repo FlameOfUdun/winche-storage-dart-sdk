@@ -52,6 +52,18 @@ String localFilePath(
       p.join(directory, localFileName(id, sourceName: sourceName, mimeType: mimeType)),
     );
 
+/// [localFileName] joined under the `cache/` subdirectory of a scoped root.
+/// Cached bytes are kept apart from `staging/` so [clearOfflineCache] can empty
+/// the cache without disturbing an upload that is still in flight.
+String cacheFilePath(
+  String root,
+  String id, {
+  String? sourceName,
+  String? mimeType,
+}) =>
+    localFilePath(p.join(root, 'cache'), id,
+        sourceName: sourceName, mimeType: mimeType);
+
 /// A deterministic FNV-1a (32-bit) hash of [s], rendered as 8 hex chars.
 /// Dart's `String.hashCode` is not guaranteed stable across runs, so a resumed
 /// upload could not recompute a `hashCode`-based path — this can.
@@ -65,8 +77,31 @@ String _stableHash(String s) {
 }
 
 /// The staging path for an in-progress pinned upload of [refPath]. Lives under a
-/// `.staging/` subdir of [directory], keyed by a stable hash of [refPath] (unique
+/// `staging/` subdir of [directory], keyed by a stable hash of [refPath] (unique
 /// per upload target) and intentionally extension-free. Deterministic, so a
 /// resumed upload recomputes the same path.
 String stagingFilePath(String directory, String refPath) =>
-    p.normalize(p.join(directory, '.staging', _stableHash(refPath)));
+    p.normalize(p.join(directory, 'staging', _stableHash(refPath)));
+
+/// Namespaces must survive being used as a file-name component. Validated rather
+/// than sanitised: silently rewriting a user id would collapse two identities
+/// onto one store, which is the leak this scoping exists to prevent.
+final _namespacePattern = RegExp(r'^[A-Za-z0-9._-]+$');
+
+/// Throws [ArgumentError] unless [namespace] is safe as a directory name.
+/// Returns it unchanged so it can be used inline.
+String validateNamespace(String namespace) {
+  if (!_namespacePattern.hasMatch(namespace) ||
+      namespace == '.' ||
+      namespace == '..') {
+    throw ArgumentError.value(namespace, 'namespace',
+        'must match [A-Za-z0-9._-]+ (it is used as a directory name)');
+  }
+  return namespace;
+}
+
+/// The per-identity root under [directory]: the sembast index, the cached bytes
+/// and the staging area all live inside it, so forgetting a user is a single
+/// directory removal and a signed-out user's cache can never half-exist.
+String scopedRootPath(String directory, String namespace) =>
+    p.normalize(p.join(directory, 'winche_storage_${validateNamespace(namespace)}'));

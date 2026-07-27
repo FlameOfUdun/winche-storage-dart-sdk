@@ -89,6 +89,6 @@ void main() {
     final entry = await catalog.entryFor('a/b.png');
     expect(entry!.status, CatalogStatus.ready);
     expect(File(entry.localPath).readAsBytesSync(), [1, 2, 3]);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 }

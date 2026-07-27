@@ -16,7 +16,9 @@ import 'transfer_controller.dart';
 import 'upload_pin_sink.dart';
 
 /// Tracks files pinned for offline availability. Owns an id-keyed cache
-/// directory rooted at [_directoryResolver]; files live at `<dir>/<id><.ext>`.
+/// directory rooted at [_directoryResolver] — which resolves to the caller's
+/// identity-scoped root — with files at `<root>/cache/<id><.ext>` and
+/// in-progress pinned uploads at `<root>/staging/<hash>`.
 class OfflineCatalog implements UploadPinSink {
   OfflineCatalog({
     required WincheStorageApi api,
@@ -90,9 +92,7 @@ class OfflineCatalog implements UploadPinSink {
       throw StateError(
           'directoryResolver is required to store files for offline use.');
     }
-    final dir = await resolver();
-    final localPath = localFilePath(dir, remote.id,
-        sourceName: ref.name, mimeType: remote.mimeType);
+    final localPath = await _cachePath(await resolver(), remote, ref.name);
 
     await _put(CatalogEntry(
       data: remote,
@@ -183,6 +183,17 @@ class OfflineCatalog implements UploadPinSink {
     return resolver();
   }
 
+  /// The `cache/` path for [data] under the scoped [root], with its directory
+  /// created. Downloads and pin finalization both write here, and neither can
+  /// assume the directory already exists.
+  Future<String> _cachePath(
+      String root, FileData data, String sourceName) async {
+    final path = cacheFilePath(root, data.id,
+        sourceName: sourceName, mimeType: data.mimeType);
+    await File(path).parent.create(recursive: true);
+    return path;
+  }
+
   /// Copies/writes the upload source into the staging area and returns the
   /// staged path. Throws on any I/O error so the caller can fall back to a
   /// deferred (stale) pin. Provide exactly one of [sourcePath] or [bytes].
@@ -241,8 +252,7 @@ class OfflineCatalog implements UploadPinSink {
   Future<void> finalizePin(ChildReference ref, FileData confirmed) async {
     final dir = await _requireDir();
     final staging = stagingFilePath(dir, ref.path);
-    final finalPath = localFilePath(dir, confirmed.id,
-        sourceName: ref.name, mimeType: confirmed.mimeType);
+    final finalPath = await _cachePath(dir, confirmed, ref.name);
     final stagedFile = File(staging);
     final finalFile = File(finalPath);
 
@@ -265,9 +275,8 @@ class OfflineCatalog implements UploadPinSink {
   /// Records a `stale` entry for a pin that could not be populated from the
   /// upload source. A later [refresh]/[pin] downloads it and flips it to ready.
   Future<void> markPinDeferred(ChildReference ref, FileData confirmed) async {
-    final dir = await _requireDir();
-    final finalPath = localFilePath(dir, confirmed.id,
-        sourceName: ref.name, mimeType: confirmed.mimeType);
+    final finalPath =
+        await _cachePath(await _requireDir(), confirmed, ref.name);
     await _put(CatalogEntry(
       data: confirmed,
       localPath: finalPath,

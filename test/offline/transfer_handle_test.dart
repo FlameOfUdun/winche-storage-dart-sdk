@@ -85,6 +85,6 @@ void main() {
     api.online = true;
     await task.whenDone;
     expect(task.state.status, UploadTaskStatus.complete);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 }

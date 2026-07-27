@@ -5,6 +5,7 @@ import 'package:mime/mime.dart';
 import 'api/winche_storage_api.dart';
 import 'directory_snapshot.dart';
 import 'file_snapshot.dart';
+import 'offline/live_task_registry.dart';
 import 'offline/offline_catalog.dart';
 import 'offline/offline_copy_status.dart';
 import 'offline/transfer_controller.dart';
@@ -23,8 +24,13 @@ final class ChildReference {
   /// Offline catalog when `enableOfflineCache` is on, else null.
   final OfflineCatalog? catalog;
 
-  /// Transfer controller when `enableAutoResume` is on, else null.
+  /// Transfer controller when a durable store is configured, else null.
   final TransferController? controller;
+
+  /// Tracks the one-shot transfers this reference starts so
+  /// `WincheStorage.close()` can abort them. Null for references built inside
+  /// the SDK, whose transfers are durable and tracked by [controller].
+  final LiveTaskRegistry? registry;
 
   const ChildReference({
     required this.path,
@@ -33,6 +39,7 @@ final class ChildReference {
     this.directoryResolver,
     this.catalog,
     this.controller,
+    this.registry,
   });
 
   /// The last path segment (e.g. `a.png`).
@@ -52,6 +59,7 @@ final class ChildReference {
       directoryResolver: directoryResolver,
       catalog: catalog,
       controller: controller,
+      registry: registry,
     );
   }
 
@@ -63,6 +71,7 @@ final class ChildReference {
       directoryResolver: directoryResolver,
       catalog: catalog,
       controller: controller,
+      registry: registry,
       path: '${this.path}/$path',
     );
   }
@@ -142,6 +151,7 @@ final class ChildReference {
         directoryResolver: directoryResolver,
         catalog: catalog,
         controller: controller,
+        registry: registry,
       );
 
   /// The parent directory of [p] (everything before the final `/`), or `''`
@@ -193,7 +203,7 @@ final class ChildReference {
         pinned: cache,
       );
     }
-    return UploadTask.start(
+    return _trackUpload(UploadTask.start(
       reference: this,
       localPath: localPath,
       mimeType: resolvedMime,
@@ -204,8 +214,16 @@ final class ChildReference {
           : null,
       onPinFinalize: cache ? (c) => catalog!.finalizePin(this, c) : null,
       onPinDeferred: cache ? (c) => catalog!.markPinDeferred(this, c) : null,
-    );
+    ));
   }
+
+  /// Registers a one-shot task with the registry, when one is configured, so
+  /// `WincheStorage.close()` can abort it. Returns [task] for inline use.
+  UploadTask _trackUpload(UploadTask task) =>
+      registry == null ? task : registry!.addUpload(task);
+
+  DownloadTask _trackDownload(DownloadTask task) =>
+      registry == null ? task : registry!.addDownload(task);
 
   /// Uploads bytes.
   ///
@@ -230,7 +248,7 @@ final class ChildReference {
       throw StateError('cache requires an offline store; configure '
           'directoryResolver or inMemory.');
     }
-    return UploadTask.startFromBytes(
+    return _trackUpload(UploadTask.startFromBytes(
       reference: this,
       bytes: bytes,
       mimeType: mimeType,
@@ -240,7 +258,7 @@ final class ChildReference {
           cache ? () => catalog!.stageForUpload(this, bytes: bytes) : null,
       onPinFinalize: cache ? (c) => catalog!.finalizePin(this, c) : null,
       onPinDeferred: cache ? (c) => catalog!.markPinDeferred(this, c) : null,
-    );
+    ));
   }
 
   /// Downloads the file to [saveTo] (an absolute path; bytes written verbatim).
@@ -257,7 +275,7 @@ final class ChildReference {
           'directoryResolver or inMemory.');
     }
     if (enqueue) return controller!.startDownload(this, saveTo: saveTo);
-    return DownloadTask.start(reference: this, saveTo: saveTo);
+    return _trackDownload(DownloadTask.start(reference: this, saveTo: saveTo));
   }
 
   /// Updates metadata on the server. Throws `StorageNotFoundException` when the

@@ -34,9 +34,9 @@ void main() {
     expect(result, p.join('root', 'a', 'b', 'id.png'));
   });
 
-  test('stagingFilePath is under .staging, hashed, and extension-free', () {
+  test('stagingFilePath is under staging/, hashed, and extension-free', () {
     final a = stagingFilePath('/cache', 'a/b.png');
-    expect(p.split(a), containsAllInOrder(['.staging']));
+    expect(p.split(a), containsAllInOrder(['staging']));
     expect(p.basename(a), isNot(contains('.'))); // no extension
     expect(a, p.normalize(a));
   });

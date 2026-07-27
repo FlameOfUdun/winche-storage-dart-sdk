@@ -5,9 +5,11 @@ import 'package:dio/dio.dart';
 import '../api/winche_storage_api.dart';
 import '../child_reference.dart';
 import '../tasks/download_task.dart';
+import '../tasks/managed_transfer.dart';
 import '../tasks/upload_task.dart';
 import 'storage_local_store.dart';
 import 'transfer_event.dart';
+import 'transfer_failure.dart';
 import 'transfer_queue.dart';
 import 'transfer_record.dart';
 import 'upload_pin_sink.dart';
@@ -45,18 +47,39 @@ class TransferController {
   final _events = StreamController<TransferEvent>.broadcast();
   final Set<int> _running = {};
 
+  /// Consecutive pauses per seq, driving only the backoff delay between probes.
+  /// Deliberately in-memory and separate from `TransferRecord.attempt`: a paused
+  /// transfer probes on the same curve as a retrying one but spends no attempts,
+  /// so it can wait out an expired token indefinitely without being dropped.
+  final Map<int, int> _pauseProbes = {};
+
   /// Live tasks keyed by path — de-dups concurrent starts for the same path.
   final Map<String, ManagedDownloadTask> _activeDownloads = {};
   final Map<String, ManagedUploadTask> _activeUploads = {};
 
   Timer? _poll;
-  bool _disposed = false;
+
+  /// Pending backoff timers, tracked so [close] can cancel them. Left untracked
+  /// they outlive the controller and fire into a store that has been closed.
+  final Set<Timer> _retryTimers = {};
+
+  bool _closed = false;
+
+  /// Whether [close] has been called. Every drive-loop continuation is gated on
+  /// it, so anything the teardown itself triggers becomes a no-op.
+  bool get isClosed => _closed;
 
   /// Set by the facade after construction (the catalog is built later). Enables
   /// finalizing pinned uploads on completion. Null when offline cache is off.
   UploadPinSink? pinSink;
 
   Stream<TransferEvent> get events => _events.stream;
+
+  void _assertOpen() {
+    if (_closed) {
+      throw StateError('WincheStorage has been closed.');
+    }
+  }
 
   ChildReference _ref(String path) => ChildReference(
         path: path,
@@ -66,6 +89,7 @@ class TransferController {
       );
 
   DownloadTask startDownload(ChildReference ref, {required String saveTo}) {
+    _assertOpen();
     final existing = _activeDownloads[ref.path];
     if (existing != null) return existing;
     final task = ManagedDownloadTask(
@@ -86,6 +110,7 @@ class TransferController {
     required int multipartThreshold,
     bool pinned = false,
   }) {
+    _assertOpen();
     final existing = _activeUploads[ref.path];
     if (existing != null) return existing;
     final sink = pinned ? pinSink : null;
@@ -185,7 +210,11 @@ class TransferController {
   }
 
   Duration _backoff(int attempt) {
-    final ms = _retry.baseDelay.inMilliseconds * (1 << (attempt - 1));
+    // The exponent is clamped, not just the result: a paused transfer probes
+    // indefinitely, and past ~30 doublings the shift itself overflows (on the
+    // web, silently) long before the clamp below could rein it in.
+    final shift = (attempt - 1).clamp(0, 30);
+    final ms = _retry.baseDelay.inMilliseconds * (1 << shift);
     final capped = ms.clamp(0, _retry.maxDelay.inMilliseconds);
     return Duration(milliseconds: capped);
   }
@@ -194,13 +223,9 @@ class TransferController {
   /// the controller's drive loop (instead of self-driving) when resumed.
   void _wireResume(int seq, TransferKind kind, String path) {
     void cb() {
-      if (_disposed || _running.contains(seq)) return;
+      if (_closed || _running.contains(seq)) return;
       _running.add(seq);
-      if (kind == TransferKind.upload) {
-        unawaited(_driveUpload(seq, path));
-      } else {
-        unawaited(_driveDownload(seq, path));
-      }
+      unawaited(_drive(seq, kind, path));
     }
 
     if (kind == TransferKind.upload) {
@@ -210,67 +235,31 @@ class TransferController {
     }
   }
 
-  /// Runs one attempt of the stable upload handle for [seq]/[path], scheduling a
-  /// retry of the same handle on transient failure and finalizing on success.
-  Future<void> _driveUpload(int seq, String path) async {
-    final task = _activeUploads[path];
-    if (task == null) {
-      _running.remove(seq);
-      return;
-    }
-    try {
-      await task.runOnce();
-    } catch (e) {
-      // Transient failure — the handle is back to `queued`. (Pause/cancel make
-      // runOnce return normally, not throw, so they're handled below.)
-      if (task.state.status == UploadTaskStatus.cancelled ||
-          task.state.status == UploadTaskStatus.paused) {
-        _running.remove(seq);
-        return;
-      }
-      final rec = await _queue.get(seq);
-      if (rec == null) {
-        _running.remove(seq);
-        _activeUploads.remove(path);
-        return;
-      }
-      final attempt = rec.attempt + 1;
-      await _queue.update(rec.copyWith(
-          status: TransferStatus.failed, attempt: attempt, lastError: '$e'));
-      _emit(TransferEventType.failed, TransferKind.upload, path, e);
-      if (attempt > _retry.maxAttempts) {
-        _running.remove(seq);
-        _activeUploads.remove(path);
-        task.failPermanently(e);
-        task.whenDone.ignore(); // consume the error so it is not unhandled
-        return;
-      }
-      _emit(TransferEventType.retrying, TransferKind.upload, path);
-      _scheduleRetry(seq, attempt, TransferKind.upload, path);
-      return;
-    }
-    // runOnce returned without throwing: complete, paused, or cancelled.
-    switch (task.state.status) {
-      case UploadTaskStatus.complete:
-        // The task finalized any `pinned` cache copy itself (via onPinFinalize)
-        // before completing, so the pin is already committed here.
-        _running.remove(seq);
-        _activeUploads.remove(path);
-        await _queue.remove(seq);
-        _emit(TransferEventType.completed, TransferKind.upload, path);
-      case UploadTaskStatus.cancelled:
-        _running.remove(seq);
-        _activeUploads.remove(path);
-        await _queue.remove(seq);
-      default:
-        // paused — stop driving; resume() re-enters via onResume.
-        _running.remove(seq);
+  /// The live managed handle for [kind]/[path], or null when none is tracked.
+  ManagedTransfer? _handle(TransferKind kind, String path) =>
+      kind == TransferKind.upload
+          ? _activeUploads[path]
+          : _activeDownloads[path];
+
+  void _dropHandle(TransferKind kind, String path) {
+    if (kind == TransferKind.upload) {
+      _activeUploads.remove(path);
+    } else {
+      _activeDownloads.remove(path);
     }
   }
 
-  /// Download counterpart of [_driveUpload] (no pin step).
-  Future<void> _driveDownload(int seq, String path) async {
-    final task = _activeDownloads[path];
+  Future<void> _driveUpload(int seq, String path) =>
+      _drive(seq, TransferKind.upload, path);
+
+  Future<void> _driveDownload(int seq, String path) =>
+      _drive(seq, TransferKind.download, path);
+
+  /// Runs one attempt of the stable handle for [seq]/[kind]/[path] and settles
+  /// the outcome: finalize on success, or route the failure through
+  /// [classifyTransferFailure].
+  Future<void> _drive(int seq, TransferKind kind, String path) async {
+    final task = _handle(kind, path);
     if (task == null) {
       _running.remove(seq);
       return;
@@ -278,64 +267,115 @@ class TransferController {
     try {
       await task.runOnce();
     } catch (e) {
-      if (task.state.status == DownloadTaskStatus.cancelled ||
-          task.state.status == DownloadTaskStatus.paused) {
-        _running.remove(seq);
+      _running.remove(seq);
+      // Closing aborts in-flight attempts; the record is reset by close() and
+      // the store is about to go away, so touching either here is both useless
+      // and unsafe.
+      if (_closed) return;
+      // Pause/cancel make runOnce return normally rather than throw, so a
+      // non-running handle here means the abort raced the failure.
+      final state = task.transferState;
+      if (state == ManagedTransferState.cancelled ||
+          state == ManagedTransferState.paused) {
         return;
       }
-      final rec = await _queue.get(seq);
-      if (rec == null) {
-        _running.remove(seq);
-        _activeDownloads.remove(path);
-        return;
-      }
-      final attempt = rec.attempt + 1;
-      await _queue.update(rec.copyWith(
-          status: TransferStatus.failed, attempt: attempt, lastError: '$e'));
-      _emit(TransferEventType.failed, TransferKind.download, path, e);
-      if (attempt > _retry.maxAttempts) {
-        _running.remove(seq);
-        _activeDownloads.remove(path);
-        task.failPermanently(e);
-        task.whenDone.ignore(); // consume the error so it is not unhandled
-        return;
-      }
-      _emit(TransferEventType.retrying, TransferKind.download, path);
-      _scheduleRetry(seq, attempt, TransferKind.download, path);
+      await _settleFailure(seq, kind, path, task, e);
       return;
     }
-    // runOnce returned without throwing: complete, paused, or cancelled.
-    switch (task.state.status) {
-      case DownloadTaskStatus.complete:
-        _running.remove(seq);
-        _activeDownloads.remove(path);
+    // runOnce returned without throwing: complete, cancelled, paused, or
+    // aborted back to queued by close().
+    _running.remove(seq);
+    if (_closed) return;
+    _pauseProbes.remove(seq);
+    switch (task.transferState) {
+      case ManagedTransferState.complete:
+        // A `pinned` upload finalized its cache copy itself (via onPinFinalize)
+        // before completing, so the pin is already committed here.
+        _dropHandle(kind, path);
         await _queue.remove(seq);
-        _emit(TransferEventType.completed, TransferKind.download, path);
-      case DownloadTaskStatus.cancelled:
-        _running.remove(seq);
-        _activeDownloads.remove(path);
+        _emit(TransferEventType.completed, kind, path);
+      case ManagedTransferState.cancelled:
+        _dropHandle(kind, path);
         await _queue.remove(seq);
       default:
-        // paused — stop driving; resume() re-enters via onResume.
-        _running.remove(seq);
+        // paused / queued — stop driving; resume() re-enters via onResume.
+        break;
+    }
+  }
+
+  /// Applies the failure taxonomy to a thrown attempt. See
+  /// [classifyTransferFailure] for why one uniform "count an attempt then give
+  /// up" policy is not safe.
+  Future<void> _settleFailure(
+    int seq,
+    TransferKind kind,
+    String path,
+    ManagedTransfer task,
+    Object e,
+  ) async {
+    final rec = await _queue.get(seq);
+    if (rec == null) {
+      _dropHandle(kind, path);
+      return;
+    }
+
+    switch (classifyTransferFailure(e)) {
+      case TransferFailureClass.pause:
+        // No attempt counted, record and handle both survive: waiting out an
+        // expired token or a dead network must never consume the retry budget.
+        await _queue.update(
+            rec.copyWith(status: TransferStatus.paused, lastError: '$e'));
+        _emit(TransferEventType.paused, kind, path, e);
+        // Keep probing on the usual backoff so a brief blip recovers in about a
+        // second rather than waiting out the backstop poll. The counter driving
+        // the delay is in-memory and separate from `rec.attempt`, which is what
+        // must not advance — this schedules retries, it does not spend them.
+        final probe = (_pauseProbes[seq] ?? 0) + 1;
+        _pauseProbes[seq] = probe;
+        _scheduleRetry(seq, probe, kind, path);
+
+      case TransferFailureClass.terminal:
+        _pauseProbes.remove(seq);
+        _dropHandle(kind, path);
+        await _queue.remove(seq);
+        _emit(TransferEventType.failed, kind, path, e, rec);
+        task.failPermanently(e);
+        task.whenDone.ignore(); // consume the error so it is not unhandled
+
+      case TransferFailureClass.retry:
+        _pauseProbes.remove(seq);
+        final attempt = rec.attempt + 1;
+        final updated = rec.copyWith(
+            status: TransferStatus.failed, attempt: attempt, lastError: '$e');
+        await _queue.update(updated);
+        _emit(TransferEventType.failed, kind, path, e, updated);
+        if (attempt > _retry.maxAttempts) {
+          // The record stays queued as `failed` so `pendingTransfers()` can
+          // still surface it; only the handle is settled.
+          _dropHandle(kind, path);
+          task.failPermanently(e);
+          task.whenDone.ignore();
+          return;
+        }
+        _emit(TransferEventType.retrying, kind, path);
+        _scheduleRetry(seq, attempt, kind, path);
     }
   }
 
   void _scheduleRetry(int seq, int attempt, TransferKind kind, String path) {
-    Timer(_backoff(attempt), () {
-      if (_disposed) return;
-      if (kind == TransferKind.upload) {
-        unawaited(_driveUpload(seq, path));
-      } else {
-        unawaited(_driveDownload(seq, path));
-      }
+    late final Timer timer;
+    timer = Timer(_backoff(attempt), () {
+      _retryTimers.remove(timer);
+      if (_closed) return;
+      unawaited(_drive(seq, kind, path));
     });
+    _retryTimers.add(timer);
   }
 
   /// Recreates a managed handle for a persisted record (if not already live) and
   /// drives it. Used by rehydrate / resume / the retry backstop.
   Future<void> _restart(int seq) async {
-    if (_disposed || _running.contains(seq)) return;
+    if (_closed || _running.contains(seq)) return;
     final rec = await _queue.get(seq);
     if (rec == null) return;
     final ref = _ref(rec.path);
@@ -435,6 +475,7 @@ class TransferController {
     for (final rec in await _queue.all()) {
       if (rec.path != path) continue;
       _running.remove(rec.seq);
+      _pauseProbes.remove(rec.seq);
       await _queue.remove(rec.seq);
     }
   }
@@ -453,28 +494,71 @@ class TransferController {
   UploadTask? uploadFor(String path) => _activeUploads[path];
   DownloadTask? downloadFor(String path) => _activeDownloads[path];
 
-  /// Backstop: retry failed records still within the attempt cap.
+  /// Backstop: re-drive failed records still within the attempt cap, and every
+  /// paused one. Paused records are re-driven unconditionally — the condition
+  /// that halted them (an expired token, no network) clears without warning, and
+  /// they carry no attempt budget to exhaust.
   Future<void> retryFailed() async {
     for (final rec in await _queue.all()) {
-      if (rec.status == TransferStatus.failed &&
-          rec.attempt <= _retry.maxAttempts &&
-          !_running.contains(rec.seq)) {
-        await _restart(rec.seq);
-      }
+      if (_running.contains(rec.seq)) continue;
+      final eligible = rec.status == TransferStatus.paused ||
+          (rec.status == TransferStatus.failed &&
+              rec.attempt <= _retry.maxAttempts);
+      if (eligible) await _restart(rec.seq);
     }
+  }
+
+  /// Re-drives every transfer halted by a pause — the thing to call after
+  /// refreshing an auth token, rather than waiting out the backstop poll.
+  Future<void> resumeTransfers() async {
+    await _resumeKind(TransferKind.upload);
+    await _resumeKind(TransferKind.download);
   }
 
   void _emit(TransferEventType type, TransferKind kind, String path,
-      [Object? error]) {
+      [Object? error, TransferRecord? record]) {
     if (!_events.isClosed) {
-      _events.add(
-          TransferEvent(type: type, kind: kind, path: path, error: error));
+      _events.add(TransferEvent(
+          type: type, kind: kind, path: path, error: error, record: record));
     }
   }
 
-  Future<void> dispose() async {
-    _disposed = true;
+  /// Stands the controller down without waiting on the network.
+  ///
+  /// In-flight attempts are aborted rather than drained, so a user switch cannot
+  /// block behind a large upload, and `running` records are reset to `pending`
+  /// so the next session picks them up. Idempotent. The caller closes the store
+  /// afterwards — everything here must finish first.
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+
     _poll?.cancel();
+    _poll = null;
+    for (final t in _retryTimers) {
+      t.cancel();
+    }
+    _retryTimers.clear();
+
+    // Abort in-flight HTTP. Not `cancel()`: for an upload that deletes the
+    // remote file, and closing the SDK says nothing about whether the upload
+    // should exist.
+    for (final t in [..._activeUploads.values, ..._activeDownloads.values]) {
+      t.abortForClose();
+    }
+    _activeUploads.clear();
+    _activeDownloads.clear();
+    _running.clear();
+    _pauseProbes.clear();
+
+    // Leave nothing marked `running`: on the next launch that would look like a
+    // transfer already being driven by someone.
+    for (final rec in await _queue.all()) {
+      if (rec.status == TransferStatus.running) {
+        await _queue.update(rec.copyWith(status: TransferStatus.pending));
+      }
+    }
+
     if (!_events.isClosed) await _events.close();
   }
 }

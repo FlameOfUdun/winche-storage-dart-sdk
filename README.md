@@ -52,7 +52,11 @@ final storage = WincheStorage(
     // rotated token is picked up automatically. Sent as `Authorization: Bearer`.
     tokenProvider: () async => currentToken,
 
-    // Resolves the offline cache root and the sembast database directory.
+    // Required unless `inMemory: true`. Scopes all local state to one identity
+    // — return the signed-in user's id. See "Multi-user" below.
+    namespaceResolver: () => currentUserId,
+
+    // Resolves the parent directory the identity-scoped root is created in.
     // Its presence (or `inMemory`, or web) enables the durable transfer queue
     // and offline cache — there are no separate enable flags.
     directoryResolver: () async {
@@ -83,8 +87,52 @@ final storage = WincheStorage(
 > download still work (`download` takes an explicit path), and durable/offline
 > operations throw `StateError` at call time.
 
-Call `await storage.dispose()` when you're done to stop the retry timer and close
-the local store.
+Call `await storage.close()` when you're done. It aborts in-flight transfers,
+cancels the retry timers and closes the local store, in that order. It is
+idempotent and never waits on the network: durable transfers are left resumable,
+while one-shot transfers fail with `StorageCancelledException`.
+
+## Multi-user
+
+Local state is single-tenant. The offline catalog, the cached bytes and the
+durable transfer queue carry no identity of their own, so one store shared
+between two users means the second user reads the first user's pinned files, and
+the first user's queued uploads replay under the second user's token.
+
+`namespaceResolver` is therefore **required** for a persistent store, and gives
+each identity its own directory:
+
+```
+<directoryResolver()>/winche_storage_<namespace>/index.db   sembast: catalog + queue
+<directoryResolver()>/winche_storage_<namespace>/cache/…    cached bytes
+<directoryResolver()>/winche_storage_<namespace>/staging/…  pinned uploads in flight
+```
+
+On the web there are no files; the namespace becomes the IndexedDB database name.
+
+It resolves lazily on first store access and is then **cached** — it pins the
+identity for the lifetime of that `WincheStorage`. Returning a different value
+later does not migrate a live instance. Switching users is:
+
+```dart
+await storage.close();
+storage = WincheStorage(WincheStorageConfig(
+  uri: uri,
+  namespaceResolver: () => newUserId,
+  directoryResolver: directoryResolver,
+));
+```
+
+Await the `close()` before building the replacement — it resolves only once the
+store is really closed. The previous user's queued transfers stay on disk and
+resume when they sign back in.
+
+The resolved namespace must match `[A-Za-z0-9._-]+` (it becomes a directory
+name). It is validated, not sanitised: quietly rewriting a user id could collapse
+two identities onto one store, which is exactly the leak this prevents.
+
+With `inMemory: true` there is no persistence to scope, so `namespaceResolver`
+must be omitted.
 
 ## How a transfer flows
 
@@ -331,7 +379,8 @@ for (final snap in live.files) {
 > copy and `data.isCached` is `true` when its content is downloaded. Server-only
 > reads don't carry these — use the `offline*` reads or `offlineCopyStatus()`.
 
-Cached files are stored at `<directoryResolver()>/<fileId><.ext>` — keyed by the
+Cached files are stored at
+`<directoryResolver()>/winche_storage_<namespace>/cache/<fileId><.ext>` — keyed by the
 immutable file id (so they survive path/metadata changes), with an extension
 derived from the name or MIME type. Pins are explicit and never auto-evicted.
 
@@ -357,9 +406,34 @@ await photoRef.resumeTransfer();
 
 // Observe lifecycle events as the queue drains.
 storage.transferEvents.listen((TransferEvent e) {
-  print('${e.type} ${e.kind} ${e.path}'); // started | completed | failed | retrying
+  // started | completed | failed | retrying | paused
+  print('${e.type} ${e.kind} ${e.path}');
 });
 ```
+
+#### How a failed attempt is handled
+
+A durable transfer's response to failure depends on what failed. One uniform
+"count an attempt, then give up" policy would let an expired token or a flat
+network destroy queued work in a couple of minutes.
+
+| Failure | Behaviour |
+| --- | --- |
+| `unauthenticated`, `unavailable` | **Paused.** The record and the handle both survive, and **no attempt is counted** — a paused transfer can wait indefinitely without exhausting its budget. It keeps probing on the usual backoff, so a brief blip recovers in about a second. Emits `TransferEventType.paused`; the record's status becomes `TransferStatus.paused` with the reason in `lastError`. |
+| `internal`, `deadlineExceeded`, `unknown`, and any non-`WincheStorageException` | **Retried** with exponential backoff, up to `retryMaxAttempts`. Past the cap the handle fails; the record stays in the queue as `failed` so `pendingTransfers()` still surfaces it. |
+| `permissionDenied`, `notFound`, `invalidArgument`, `failedPrecondition` | **Terminal.** The record is dropped and the handle fails. The `failed` event carries the full `TransferRecord` in `record`, so the work is recoverable — a path and an error alone would lose the source `localPath`, `mimeType` and `metadata`. |
+
+After refreshing an auth token, call `storage.resumeTransfers()` to re-drive
+everything that paused, rather than waiting out the `retryPollInterval` backstop:
+
+```dart
+await refreshMyToken();
+await storage.resumeTransfers();
+```
+
+Note that a paused transfer's `whenDone` does **not** settle while it is paused —
+that is the point of the stable handle: you can start an upload while offline and
+simply `await` it.
 
 A durable (`enqueue: true`) transfer is **tracked** and deduped by path: calling
 `uploadPath`/`download` again for the same path returns the existing handle
@@ -431,11 +505,12 @@ final bool deleted = await photoRef.delete(); // false if the file didn't exist
 | `tokenProvider` | `FutureOr<String> Function()?` | null | Returns the auth token, re-read per request and sent as `Authorization: Bearer` |
 | `multipartThreshold` | `int` | `5 * 1024 * 1024` | File size (bytes) above which multipart upload is used |
 | `inMemory` | `bool` | `false` | Use an in-memory index (catalog + queue) instead of sembast; files still go to disk. Also enables the subsystems |
-| `directoryResolver` | `Future<String> Function()?` | null | Resolves the offline cache root + sembast directory (lazy, cached). **Its presence (or `inMemory`/web) enables the durable queue + offline cache** |
+| `namespaceResolver` | `FutureOr<String> Function()?` | null | **Required unless `inMemory`** (and must be omitted when it is). Scopes all local state to one identity (lazy, cached). Must match `[A-Za-z0-9._-]+`. See [Multi-user](#multi-user) |
+| `directoryResolver` | `Future<String> Function()?` | null | Resolves the parent directory the identity-scoped root is created in (lazy, cached). **Its presence (or `inMemory`/web) enables the durable queue + offline cache** |
 | `retryBaseDelay` | `Duration` | `1s` | Initial backoff before the first durable-transfer retry |
 | `retryMaxDelay` | `Duration` | `30s` | Cap on the exponential backoff between retries |
 | `retryMaxAttempts` | `int` | `5` | Retries before a transfer fails permanently |
-| `retryPollInterval` | `Duration` | `30s` | Backstop poll interval that re-drives still-retryable failed transfers |
+| `retryPollInterval` | `Duration` | `30s` | Backstop poll interval that re-drives still-retryable failed transfers, and every paused one |
 
 ### `WincheStorage`
 
@@ -444,13 +519,15 @@ final bool deleted = await photoRef.delete(); // false if the file didn't exist
 | `WincheStorage(config)` | Creates the SDK. Ready to use immediately; auto-resumes pending transfers when a store is configured. |
 | `WincheStorage.withStore(api, store, {...})` | Advanced/testing: build over an explicit `WincheStorageApi` and `StorageLocalStore` (subsystems always available). |
 | `child(path)` | Returns a `ChildReference` for the given path. |
+| `resumeTransfers()` | Re-drives every transfer halted by a pause (expired token, unreachable server). Call after refreshing an auth token. Throws `StateError` when no store is configured. |
 | `resumeDownloads()` | Drains all queued downloads. Throws `StateError` when no store is configured. |
 | `resumeUploads()` | Drains all queued uploads. Throws `StateError` when no store is configured. |
-| `pendingTransfers({kind})` | Snapshot of the durable queue (pending/running/failed `TransferRecord`s), optionally filtered by `TransferKind`. Throws `StateError` when no store is configured. |
+| `pendingTransfers({kind})` | Snapshot of the durable queue (pending/running/paused/failed `TransferRecord`s), optionally filtered by `TransferKind`. Throws `StateError` when no store is configured. |
 | `transferEvents` | `Stream<TransferEvent>` of queue lifecycle events. Throws `StateError` when no store is configured. |
 | `uploadFor(path)` / `downloadFor(path)` | The live tracked transfer handle for `path` (or `null`), to reattach a progress UI after a restart. Throws `StateError` when no store is configured. |
 | `clearOfflineCache()` | Evicts every pinned file. Throws `StateError` when no store is configured. |
-| `dispose()` | Stops the retry timer and closes the local store. |
+| `close()` | Aborts in-flight transfers, cancels the retry timers and closes the local store, in that order. Idempotent, never waits on the network. Durable transfers stay resumable; one-shot ones fail with `StorageCancelledException`. Every member above throws `StateError` afterwards. |
+| `isClosed` | Whether `close()` has been called. |
 
 ### `ChildReference`
 
@@ -551,10 +628,10 @@ An immutable snapshot of a directory listing, returned by `listChildren()`
 
 | Type | Description |
 | --- | --- |
-| `TransferEvent` | `{type, kind, path, error}` emitted on `transferEvents`. |
-| `TransferEventType` | `started`, `completed`, `failed`, `retrying`. |
+| `TransferEvent` | `{type, kind, path, error, record}` emitted on `transferEvents`. `record` is the `TransferRecord` on a `failed` event, so dropped work can be re-enqueued. |
+| `TransferEventType` | `started`, `completed`, `failed`, `retrying`, `paused`. |
 | `TransferKind` | `upload`, `download`. |
-| `TransferRecord` / `TransferStatus` | A persisted queue entry returned by `pendingTransfers` — `{seq, kind, path, status, attempt, lastError, …}`; status is `pending`, `running`, or `failed`. |
+| `TransferRecord` / `TransferStatus` | A persisted queue entry returned by `pendingTransfers` — `{seq, kind, path, status, attempt, lastError, …}`; status is `pending`, `running`, `paused`, or `failed`. A `paused` transfer is waiting on a token or the network and has spent no attempts. |
 | `CatalogEntry` / `CatalogStatus` | A pinned file record (`downloading`, `ready`, `stale`). |
 | `OfflineCopyStatus` | `notPinned`, `upToDate`, `contentChanged`, `remoteDeleted`, `unknown` — result of `offlineCopyStatus()`. |
 | `StorageLocalStore` | Persistence interface; `MemoryStorageLocalStore` and `SembastStorageLocalStore` ship by default. |

@@ -13,7 +13,10 @@ class _ThrowingGetFileApi extends NoopApi {
 
 void main() {
   test('defaults off: child works with no store, resume throws', () {
-    final s = WincheStorage(WincheStorageConfig(uri: Uri.parse('https://x/f')));
+    final s = WincheStorage(WincheStorageConfig(
+      uri: Uri.parse('https://x/f'),
+      namespaceResolver: () => 'user-1',
+    ));
     final ref = s.child('a/b');
     expect(ref.path, 'a/b');
     expect(s.resumeDownloads, throwsStateError);
@@ -27,7 +30,7 @@ void main() {
       MemoryStorageLocalStore(),
     );
     expect(await s.pendingTransfers(), isEmpty);
-    await s.dispose();
+    await s.close();
   });
 
   test('inMemory auto-resume needs no directory and wires resume', () async {
@@ -38,7 +41,7 @@ void main() {
     await s.resumeDownloads();
     await s.resumeUploads();
     expect(s.transferEvents, isA<Stream<TransferEvent>>());
-    await s.dispose();
+    await s.close();
   });
 
   test('facade: enqueue+cache uploadPath stages through the controller',
@@ -53,7 +56,7 @@ void main() {
       retryMaxAttempts: 0,
       retryPollInterval: const Duration(hours: 1),
     );
-    addTearDown(storage.dispose);
+    addTearDown(storage.close);
 
     final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
     final task = storage

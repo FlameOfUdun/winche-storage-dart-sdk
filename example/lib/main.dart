@@ -12,6 +12,10 @@ void main() async {
   final storage = WincheStorage(
     WincheStorageConfig(
       uri: Uri.parse('http://localhost:5209/files'),
+      // Scopes all local state — cached files, the durable transfer queue — to
+      // one identity. A real app returns the signed-in user's id here; switching
+      // users is `await storage.close()` plus a new WincheStorage.
+      namespaceResolver: () => 'demo-user',
       directoryResolver: () async {
         final dir = await getApplicationDocumentsDirectory();
         return p.join(dir.path, 'winche_files');
@@ -707,6 +711,8 @@ class _TransferEventsFeed extends StatelessWidget {
         return Icons.error_outline;
       case TransferEventType.retrying:
         return Icons.refresh;
+      case TransferEventType.paused:
+        return Icons.pause_circle_outline;
     }
   }
 }

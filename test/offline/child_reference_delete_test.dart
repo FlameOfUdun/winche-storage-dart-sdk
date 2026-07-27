@@ -98,6 +98,6 @@ void main() {
     await ref.delete();
 
     expect((await q.all()).where((r) => r.path == 'a/b.png'), isEmpty);
-    await ctrl.dispose();
+    await ctrl.close();
   });
 }

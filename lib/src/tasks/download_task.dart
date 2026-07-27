@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 
+import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
+import 'managed_transfer.dart';
 
 enum DownloadTaskStatus {
   queued,
@@ -186,6 +188,19 @@ abstract class DownloadTask {
   /// Resumes a [DownloadTaskStatus.paused] download.
   void resume();
 
+  /// Aborts an in-flight attempt because `WincheStorage.close()` was called.
+  /// A managed download returns to `queued` and resumes from its durable record
+  /// next session; a one-shot download has no record to resume from, so it
+  /// settles with [StorageCancelledException].
+  void abortForClose();
+
+  /// Cancels in-flight HTTP without touching status or completion. Shared by
+  /// the two [abortForClose] implementations.
+  void _abortInFlight() {
+    _cancelToken?.cancel('closed');
+    _cancelToken = null;
+  }
+
   /// Cancels the download and deletes any partially written file.
   void cancel() async {
     if (_isTerminal(_state.status)) {
@@ -301,11 +316,23 @@ class _DirectDownloadTask extends DownloadTask {
     }
     unawaited(_run(isResume: true));
   }
+
+  @override
+  void abortForClose() {
+    if (_isTerminal(_state.status)) return;
+    _abortInFlight();
+    _setStatus(DownloadTaskStatus.cancelled);
+    if (!_taskCompleter.isCompleted) {
+      _taskCompleter.completeError(
+          const StorageCancelledException('WincheStorage was closed.'));
+    }
+    _closeStreams();
+  }
 }
 
 /// Controller-driven download task. Starts [DownloadTaskStatus.queued] and does
 /// NOT auto-run. The controller drives attempts via [runOnce].
-class ManagedDownloadTask extends DownloadTask {
+class ManagedDownloadTask extends DownloadTask implements ManagedTransfer {
   ManagedDownloadTask({
     required super.reference,
     required super.saveTo,
@@ -320,12 +347,33 @@ class ManagedDownloadTask extends DownloadTask {
 
   /// Invoked by [resume] so the controller re-drives the same handle.
   /// Set by the controller.
+  @override
   void Function()? onResume;
+
+  @override
+  ManagedTransferState get transferState => switch (_state.status) {
+        DownloadTaskStatus.queued => ManagedTransferState.queued,
+        DownloadTaskStatus.running => ManagedTransferState.running,
+        DownloadTaskStatus.paused => ManagedTransferState.paused,
+        DownloadTaskStatus.complete => ManagedTransferState.complete,
+        DownloadTaskStatus.failed => ManagedTransferState.failed,
+        DownloadTaskStatus.cancelled => ManagedTransferState.cancelled,
+      };
+
+  @override
+  void abortForClose() {
+    if (_isTerminal(_state.status)) return;
+    _abortInFlight();
+    // Back to `queued`, not `paused`: the durable record is flipped to pending
+    // by the controller and this handle resumes on the next launch.
+    _setStatus(DownloadTaskStatus.queued);
+  }
 
   /// Runs exactly one attempt (managed mode). On success the task completes
   /// ([DownloadTaskStatus.complete], `whenDone` resolves). On failure it returns
   /// to [DownloadTaskStatus.queued] and rethrows WITHOUT completing `whenDone`,
   /// so the controller can retry the same handle or call [failPermanently].
+  @override
   Future<void> runOnce({bool isResume = false}) async {
     _setStatus(DownloadTaskStatus.running);
     _cancelToken = CancelToken();
@@ -340,6 +388,7 @@ class ManagedDownloadTask extends DownloadTask {
 
   /// Terminal failure (managed mode): retries exhausted / non-retryable. Sets
   /// [DownloadTaskStatus.failed] and errors `whenDone`.
+  @override
   void failPermanently(Object error, [StackTrace? st]) {
     _setStatus(DownloadTaskStatus.failed);
     if (!_taskCompleter.isCompleted) {

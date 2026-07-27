@@ -1,6 +1,17 @@
 enum TransferKind { upload, download }
 
-enum TransferStatus { pending, running, failed }
+enum TransferStatus {
+  pending,
+  running,
+
+  /// Halted on a condition that clears by itself — an expired token or no
+  /// network. Distinct from [failed]: no attempt was counted, so a paused
+  /// transfer never exhausts its retry budget just by waiting. [lastError]
+  /// carries the reason.
+  paused,
+
+  failed,
+}
 
 /// A persisted in-flight transfer. Stores *intent*; byte progress is re-derived
 /// on resume by the existing task engine (multipart `listParts` for uploads,

@@ -4,10 +4,12 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
+import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
 import '../file_snapshot.dart';
 import '../models/file_data.dart';
 import '../models/upload_status.dart';
+import 'managed_transfer.dart';
 
 enum UploadTaskStatus {
   queued,
@@ -400,6 +402,22 @@ abstract class UploadTask {
   /// Resumes a paused upload.
   void resume();
 
+  /// Aborts an in-flight attempt because `WincheStorage.close()` was called.
+  ///
+  /// Deliberately not [cancel], which deletes the remote file: closing the SDK
+  /// says nothing about whether the upload should exist. A managed upload
+  /// returns to `queued` and resumes from its durable record next session; a
+  /// one-shot upload has no record to resume from, so it settles with
+  /// [StorageCancelledException].
+  void abortForClose();
+
+  /// Cancels in-flight HTTP without touching status or completion. Shared by
+  /// the two [abortForClose] implementations.
+  void _abortInFlight() {
+    _cancelToken?.cancel('closed');
+    _cancelToken = null;
+  }
+
   /// Cancels the upload, deletes the remote file, and clears the pending
   /// record. Returns a [Future] that resolves once cleanup is complete.
   Future<void> cancel() async {
@@ -525,11 +543,23 @@ class _DirectUploadTask extends UploadTask {
     }
     unawaited(_runUnmanaged());
   }
+
+  @override
+  void abortForClose() {
+    if (_isTerminal(_state.status)) return;
+    _abortInFlight();
+    _setStatus(UploadTaskStatus.cancelled);
+    if (!_taskCompleter.isCompleted) {
+      _taskCompleter.completeError(
+          const StorageCancelledException('WincheStorage was closed.'));
+    }
+    _closeStreams();
+  }
 }
 
 /// Controller-driven upload task. Starts [UploadTaskStatus.queued] and does
 /// NOT auto-run. The controller drives attempts via [runOnce].
-class ManagedUploadTask extends UploadTask {
+class ManagedUploadTask extends UploadTask implements ManagedTransfer {
   ManagedUploadTask({
     required super.reference,
     super.localPath,
@@ -551,10 +581,32 @@ class ManagedUploadTask extends UploadTask {
 
   /// Invoked by [resume] so the controller re-drives the same handle.
   /// Set by the controller.
+  @override
   void Function()? onResume;
+
+  @override
+  ManagedTransferState get transferState => switch (_state.status) {
+        UploadTaskStatus.queued => ManagedTransferState.queued,
+        UploadTaskStatus.running => ManagedTransferState.running,
+        UploadTaskStatus.paused => ManagedTransferState.paused,
+        UploadTaskStatus.complete => ManagedTransferState.complete,
+        UploadTaskStatus.failed => ManagedTransferState.failed,
+        UploadTaskStatus.cancelled => ManagedTransferState.cancelled,
+      };
+
+  @override
+  void abortForClose() {
+    if (_isTerminal(_state.status)) return;
+    _abortInFlight();
+    // Back to `queued`, not `paused`: the durable record is flipped to pending
+    // by the controller and this handle resumes on the next launch. A terminal
+    // status here would settle `whenDone` for a transfer that is still owed.
+    _setStatus(UploadTaskStatus.queued);
+  }
 
   /// One managed attempt: success completes the task; failure returns to
   /// [UploadTaskStatus.queued] and rethrows without completing `whenDone`.
+  @override
   Future<void> runOnce() async {
     _setStatus(UploadTaskStatus.running);
     _cancelToken = CancelToken();
@@ -572,6 +624,7 @@ class ManagedUploadTask extends UploadTask {
 
   /// Terminal failure (managed mode): retries exhausted / non-retryable. Sets
   /// [UploadTaskStatus.failed] and errors `whenDone`.
+  @override
   void failPermanently(Object error, [StackTrace? st]) {
     _setStatus(UploadTaskStatus.failed);
     if (!_taskCompleter.isCompleted) {

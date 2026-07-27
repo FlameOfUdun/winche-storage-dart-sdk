@@ -88,6 +88,6 @@ void main() {
     await task.whenDone; // resolves only because resume re-drove the SAME handle
     expect(task.state.status, UploadTaskStatus.complete);
 
-    await ctrl.dispose();
+    await ctrl.close();
   });
 }

@@ -151,7 +151,7 @@ void main() {
     expect(await cat.entryFor('a/b.png'), isNull);
   });
 
-  test('stageForUpload copies a source file into .staging and verifies size',
+  test('stageForUpload copies a source file into staging/ and verifies size',
       () async {
     final cat = build({});
     final src = File('${tmp.path}/src.bin')..writeAsBytesSync([1, 2, 3, 4]);
@@ -161,10 +161,10 @@ void main() {
 
     expect(File(staged).existsSync(), isTrue);
     expect(File(staged).lengthSync(), 4);
-    expect(p.split(staged), contains('.staging'));
+    expect(p.split(staged), contains('staging'));
   });
 
-  test('stageForUpload writes in-memory bytes into .staging', () async {
+  test('stageForUpload writes in-memory bytes into staging/', () async {
     final cat = build({});
     final ref = ChildReference(path: 'a/b.png', api: _Api({}));
 
@@ -184,7 +184,7 @@ void main() {
 
     await cat.finalizePin(ref, confirmed);
 
-    final expectedFinal = p.join(tmp.path, 'id-a_b.png');
+    final expectedFinal = p.join(tmp.path, 'cache', 'id-a_b.png');
     expect(File(staged).existsSync(), isFalse); // moved, not copied
     expect(File(expectedFinal).readAsBytesSync(), [1, 2, 3]);
     final entry = await cat.entryFor('a/b.png');
@@ -211,7 +211,7 @@ void main() {
 
     final entry = await cat.entryFor('a/b.png');
     expect(entry!.status, CatalogStatus.stale);
-    expect(entry.localPath, p.join(tmp.path, 'id-a_b.png'));
+    expect(entry.localPath, p.join(tmp.path, 'cache', 'id-a_b.png'));
   });
 
   test('UploadPinSink: stage, resolve, finalize by path', () async {
