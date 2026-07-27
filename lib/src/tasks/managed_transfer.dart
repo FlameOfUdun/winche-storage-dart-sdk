@@ -32,4 +32,14 @@ abstract interface class ManagedTransfer {
   /// Invoked when a paused handle is resumed, so the controller re-enters its
   /// drive loop rather than letting the handle self-drive.
   abstract void Function()? onResume;
+
+  /// Awaited immediately before the handle completes, so the controller's
+  /// bookkeeping — dropping the durable record, emitting `completed` — is
+  /// already done by the time `whenDone` resolves.
+  ///
+  /// Without it the record is removed just *after* `runOnce` returns, so
+  /// `await task.whenDone` followed by `pendingTransfers()` could still see the
+  /// finished transfer. Same contract as the pinned upload's `onPinFinalize`:
+  /// a completed transfer has fully landed.
+  abstract Future<void> Function()? onBeforeComplete;
 }

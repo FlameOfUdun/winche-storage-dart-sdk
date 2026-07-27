@@ -584,6 +584,23 @@ class ManagedUploadTask extends UploadTask implements ManagedTransfer {
   @override
   void Function()? onResume;
 
+  /// Awaited just before this task completes. Set by the controller.
+  @override
+  Future<void> Function()? onBeforeComplete;
+
+  /// Runs [onBeforeComplete], swallowing its failure: the upload has already
+  /// succeeded on the server, and losing that outcome over a bookkeeping error
+  /// would be worse than a stale queue entry.
+  Future<void> _settleBeforeComplete() async {
+    final hook = onBeforeComplete;
+    if (hook == null) return;
+    try {
+      await hook();
+    } catch (_) {
+      // best-effort; the drive loop reconciles the record either way
+    }
+  }
+
   @override
   ManagedTransferState get transferState => switch (_state.status) {
         UploadTaskStatus.queued => ManagedTransferState.queued,
@@ -614,6 +631,9 @@ class ManagedUploadTask extends UploadTask implements ManagedTransfer {
       final confirmed = await _attemptOnce();
       _setProgress(1.0);
       _setStatus(UploadTaskStatus.complete);
+      // The pin (via onPinFinalize) and now the durable record are both settled
+      // before `whenDone` resolves, so a completed upload has fully landed.
+      await _settleBeforeComplete();
       _completeTask(confirmed);
     } catch (e) {
       if (e is DioException && e.type == DioExceptionType.cancel) return;

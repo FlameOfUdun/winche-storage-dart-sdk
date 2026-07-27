@@ -158,7 +158,7 @@ class TransferController {
               createdAt: DateTime.now(),
             ));
     _running.add(seq);
-    _wireResume(seq, TransferKind.download, path);
+    _wireHandle(seq, TransferKind.download, path);
     _emit(TransferEventType.started, TransferKind.download, path);
     unawaited(_driveDownload(seq, path));
   }
@@ -188,7 +188,7 @@ class TransferController {
                   pinned: pinned,
                 ));
     _running.add(seq);
-    _wireResume(seq, TransferKind.upload, path);
+    _wireHandle(seq, TransferKind.upload, path);
     _emit(TransferEventType.started, TransferKind.upload, path);
     unawaited(_driveUpload(seq, path));
   }
@@ -219,20 +219,33 @@ class TransferController {
     return Duration(milliseconds: capped);
   }
 
-  /// Wires the live handle's `onResume` so a paused tracked transfer re-enters
-  /// the controller's drive loop (instead of self-driving) when resumed.
-  void _wireResume(int seq, TransferKind kind, String path) {
-    void cb() {
+  /// Wires the live handle's controller callbacks. Called once [seq] is known
+  /// and always before the handle is first driven:
+  ///
+  /// * `onResume` — a paused tracked transfer re-enters the drive loop instead
+  ///   of self-driving.
+  /// * `onBeforeComplete` — the durable record is dropped and `completed`
+  ///   emitted *before* `whenDone` resolves, so a caller that awaits a transfer
+  ///   never sees it still sitting in `pendingTransfers()`.
+  void _wireHandle(int seq, TransferKind kind, String path) {
+    void onResume() {
       if (_closed || _running.contains(seq)) return;
       _running.add(seq);
       unawaited(_drive(seq, kind, path));
     }
 
-    if (kind == TransferKind.upload) {
-      _activeUploads[path]?.onResume = cb;
-    } else {
-      _activeDownloads[path]?.onResume = cb;
+    Future<void> onBeforeComplete() async {
+      if (_closed) return;
+      _running.remove(seq);
+      _pauseProbes.remove(seq);
+      _dropHandle(kind, path);
+      await _queue.remove(seq);
+      _emit(TransferEventType.completed, kind, path);
     }
+
+    final handle = _handle(kind, path);
+    handle?.onResume = onResume;
+    handle?.onBeforeComplete = onBeforeComplete;
   }
 
   /// The live managed handle for [kind]/[path], or null when none is tracked.
@@ -289,11 +302,11 @@ class TransferController {
     _pauseProbes.remove(seq);
     switch (task.transferState) {
       case ManagedTransferState.complete:
-        // A `pinned` upload finalized its cache copy itself (via onPinFinalize)
-        // before completing, so the pin is already committed here.
-        _dropHandle(kind, path);
-        await _queue.remove(seq);
-        _emit(TransferEventType.completed, kind, path);
+        // Nothing to do: the handle ran `onBeforeComplete` — dropping the
+        // record and emitting `completed` — before it completed, and a `pinned`
+        // upload finalized its cache copy via onPinFinalize before that. Both
+        // are settled by the time a caller's `whenDone` resolves.
+        break;
       case ManagedTransferState.cancelled:
         _dropHandle(kind, path);
         await _queue.remove(seq);
@@ -392,7 +405,7 @@ class TransferController {
           );
       _activeDownloads[rec.path] = task;
       _running.add(seq);
-      _wireResume(seq, TransferKind.download, rec.path);
+      _wireHandle(seq, TransferKind.download, rec.path);
       await _queue.update(rec.copyWith(status: TransferStatus.running));
       _emit(TransferEventType.retrying, TransferKind.download, rec.path);
       unawaited(_driveDownload(seq, rec.path));
@@ -423,7 +436,7 @@ class TransferController {
           );
       _activeUploads[rec.path] = task;
       _running.add(seq);
-      _wireResume(seq, TransferKind.upload, rec.path);
+      _wireHandle(seq, TransferKind.upload, rec.path);
       await _queue.update(rec.copyWith(status: TransferStatus.running));
       _emit(TransferEventType.retrying, TransferKind.upload, rec.path);
       unawaited(_driveUpload(seq, rec.path));

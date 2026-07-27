@@ -58,6 +58,12 @@ queue that survives an expired token. Ports the fixes from `winche_database`
   an upload deletes the remote file, which closing the SDK should never imply.
 * A retry backoff of many doublings no longer overflows its shift (reachable now
   that a paused transfer probes indefinitely).
+* **A completed transfer is no longer briefly still in the queue.** The durable
+  record was dropped just *after* the handle completed, so `await task.whenDone`
+  followed by `pendingTransfers()` could still see the finished transfer, and the
+  `completed` event could arrive after it. Both now happen in an awaited
+  `onBeforeComplete` hook that runs before the handle completes — the same
+  contract `cache: true` uploads already had for their pin.
 * A store that cannot open — an unusable namespace, an uncreatable directory — no
   longer escapes as an unhandled async error from the constructor's
   fire-and-forget rehydrate. The failure resurfaces, catchably, on the next store

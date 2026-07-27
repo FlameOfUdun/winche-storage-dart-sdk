@@ -87,4 +87,33 @@ void main() {
     expect(task.state.status, UploadTaskStatus.complete);
     await ctrl.close();
   });
+
+  test('a completed transfer has already left the queue when whenDone resolves',
+      () async {
+    final api = _FlakyApi()..online = true;
+    final ctrl = build(api, MemoryStorageLocalStore());
+    final src = File('${tmp.path}/s.txt')..writeAsBytesSync([1, 2, 3]);
+    final ref = ChildReference(path: 'a/b', api: api);
+
+    final events = <TransferEvent>[];
+    ctrl.events.listen(events.add);
+
+    final task = ctrl.startUpload(ref,
+        localPath: src.path,
+        mimeType: 'text/plain',
+        multipartThreshold: 5 * 1024 * 1024);
+
+    await task.whenDone;
+
+    // Read on the very next turn — no polling. The controller's bookkeeping runs
+    // in `onBeforeComplete`, before the handle completes, so awaiting a transfer
+    // and then reading the queue can never show the finished work.
+    expect(await ctrl.pendingTransfers(), isEmpty);
+    expect(ctrl.uploadFor('a/b'), isNull,
+        reason: 'the live handle should be dropped too');
+    expect(events.map((e) => e.type), contains(TransferEventType.completed),
+        reason: 'the completed event precedes whenDone');
+
+    await ctrl.close();
+  });
 }

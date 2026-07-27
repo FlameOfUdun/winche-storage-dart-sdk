@@ -435,6 +435,11 @@ Note that a paused transfer's `whenDone` does **not** settle while it is paused 
 that is the point of the stable handle: you can start an upload while offline and
 simply `await` it.
 
+When a transfer's `whenDone` resolves, it has fully landed: the durable record is
+already gone from `pendingTransfers()`, the `completed` event has already been
+emitted, and a `cache: true` upload's offline copy is already committed. You can
+read any of them on the next line without waiting.
+
 A durable (`enqueue: true`) transfer is **tracked** and deduped by path: calling
 `uploadPath`/`download` again for the same path returns the existing handle
 rather than starting a duplicate. After a restart the original handle object is

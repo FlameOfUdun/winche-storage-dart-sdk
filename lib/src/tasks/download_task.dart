@@ -111,6 +111,7 @@ abstract class DownloadTask {
       if (record != null && existingBytes >= record.sizeBytes) {
         _setProgress(1.0);
         _setStatus(DownloadTaskStatus.complete);
+        await _settleBeforeComplete();
         _completeTask();
         return;
       }
@@ -170,6 +171,9 @@ abstract class DownloadTask {
 
     _setProgress(1.0);
     _setStatus(DownloadTaskStatus.complete);
+    // Settle the durable record before `whenDone` resolves, so a completed
+    // download is never still visible in `pendingTransfers()`.
+    await _settleBeforeComplete();
     _completeTask();
   }
 
@@ -199,6 +203,24 @@ abstract class DownloadTask {
   void _abortInFlight() {
     _cancelToken?.cancel('closed');
     _cancelToken = null;
+  }
+
+  /// Awaited just before a successful completion. Null for a one-shot download;
+  /// the controller sets it on a managed one. It lives on the base because
+  /// [_attempt] — shared with the one-shot path — is where completion happens.
+  Future<void> Function()? onBeforeComplete;
+
+  /// Runs [onBeforeComplete], swallowing its failure: the bytes are already on
+  /// disk and verified, so a bookkeeping error must not turn that into a
+  /// failed download.
+  Future<void> _settleBeforeComplete() async {
+    final hook = onBeforeComplete;
+    if (hook == null) return;
+    try {
+      await hook();
+    } catch (_) {
+      // best-effort; the drive loop reconciles the record either way
+    }
   }
 
   /// Cancels the download and deletes any partially written file.
@@ -349,6 +371,9 @@ class ManagedDownloadTask extends DownloadTask implements ManagedTransfer {
   /// Set by the controller.
   @override
   void Function()? onResume;
+
+  // `onBeforeComplete` is inherited from [DownloadTask]; it satisfies the
+  // ManagedTransfer contract and is set by the controller.
 
   @override
   ManagedTransferState get transferState => switch (_state.status) {
