@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 4.0.1
+
+Packaging only — the library code is byte-for-byte identical to 4.0.0.
+
+* The published archive no longer contains `docs/superpowers/`, the design specs
+  and implementation plans. They are internal working documents that made up
+  roughly half the archive and help nobody consuming the package. They remain in
+  the repository. Archive size drops from 382 KB to 341 KB.
+
 ## 4.0.0
 
 Identity-scoped local state, a close that can't race the store, and a transfer
