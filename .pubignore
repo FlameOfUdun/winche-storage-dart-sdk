@@ -1,0 +1,41 @@
+# Files excluded from the published pub.dev archive.
+#
+# NOTE: where a .pubignore exists, pub uses it *instead of* the .gitignore in
+# the same directory. So this file must repeat everything the root .gitignore
+# excludes — otherwise build output, IDE files and the lockfile would start
+# shipping. (.gitignore files in subdirectories, e.g. example/, still apply.)
+
+# ── Not for consumers ───────────────────────────────────────────────────────
+# Design specs and implementation plans: internal working documents, and about
+# half the archive by size. Nothing here helps someone using the package.
+docs/
+.claude/
+
+# ── Mirrors the root .gitignore from here down ──────────────────────────────
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter/Dart/Pub related
+# Libraries should not include pubspec.lock, per https://dart.dev/guides/libraries/private-files#pubspeclock.
+/pubspec.lock
+**/doc/api/
+.dart_tool/
+.flutter-plugins-dependencies
+/build/
+/coverage/
