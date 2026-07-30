@@ -346,10 +346,253 @@ git commit -m "feat: add ChildReference.cachedFiles()"
 
 ---
 
+## Task 2b: Apply Task 2's code review
+
+Doc and test changes only — no behaviour change. Each item came out of the
+review of commit `5eca875`.
+
+**Files:**
+- Modify: `lib/src/offline/offline_catalog.dart`
+- Modify: `lib/src/child_reference.dart`
+- Modify: `test/offline/cached_files_test.dart`
+
+- [ ] **Step 1: Record why the parent is derived rather than read**
+
+Every row carries a `data.directory` field, and this code ignores it. That is
+deliberate, and currently invisible. Replace `_parentDir`'s doc comment with:
+
+```dart
+  /// The parent directory of [p] — everything before the final `/`.
+  ///
+  /// Derived from the key rather than read from `data.directory`: that field
+  /// is the server's, nothing local keeps it in step with the key a row is
+  /// stored under, and the result of [cachedFilesIn] is a list of keys.
+  ///
+  /// A slashless path yields `''`. That is the root, which [ChildReference]
+  /// models as a null parent rather than as an address; the two only meet if a
+  /// caller builds `child('')`, which nothing in the API produces on its own.
+  String _parentDir(String p) {
+```
+
+- [ ] **Step 2: Put the sequential-stat rationale where the reader is**
+
+The loop reads as an accidental serialization, which invites the wrong fix.
+Inside `cachedFilesIn`, add the comment above the `await`:
+
+```dart
+    for (final entry in await all()) {
+      if (_parentDir(entry.path) != directory) continue;
+      // Sequential on purpose: `Future.wait` over these stats would save
+      // microseconds and risk a descriptor storm on a large directory.
+      final file = await _verifiedFile(entry);
+      if (file != null) out.add(file);
+    }
+```
+
+- [ ] **Step 3: Give `cachedFilesIn`'s doc the reason instead of the restatement**
+
+Its second paragraph currently restates what `_verifiedFile` one method above
+already says, and asserts the one-level rule without giving the reason for it.
+Replace the doc comment with:
+
+```dart
+  /// The cached files whose parent directory is exactly [directory], sorted by
+  /// path.
+  ///
+  /// One level, because the server's listing is one level: a recursive variant
+  /// would cover a different set than [ChildReference.listChildren], and
+  /// comparing the two is the point of having both. Verified through
+  /// [_verifiedFile].
+```
+
+- [ ] **Step 4: Fix the antecedent slip in `cachedFile`'s doc**
+
+"a caller that gets one back" reads as referring to the null. Replace the doc
+comment with:
+
+```dart
+  /// The cached copy at [path], or null when this device has no usable bytes.
+  ///
+  /// Absence is not an error: "I do not have these bytes" is an ordinary
+  /// answer, not a failure. A non-null result is one a caller can act on
+  /// directly — its `localPath` opens. A row this returns null for is repaired
+  /// by the next [pin].
+```
+
+- [ ] **Step 5: State the exact-match constraint on the public method**
+
+In `lib/src/child_reference.dart`, in `cachedFiles()`'s doc comment, insert this
+paragraph before the closing "This reports what this device holds" paragraph:
+
+```dart
+  /// Matching is on the exact parent path, so `u1` never picks up `u10`'s
+  /// files — and equally, a reference built with a trailing slash matches
+  /// nothing, since no path normalization happens anywhere in this package.
+```
+
+- [ ] **Step 6: Refactor the test fixture and close two coverage gaps**
+
+The file grows from 3 tests to 12 over the next two tasks, and every test
+repeats the same three-line setup. `_OfflineApi` is also an empty subclass of
+`NoopApi` that exists only to hold a comment. Replace the whole contents of
+`test/offline/cached_files_test.dart` with:
+
+```dart
+import 'dart:io';
+
+import 'package:test/test.dart';
+import 'package:winche_storage/src/offline/offline_catalog.dart';
+import 'package:winche_storage/winche_storage.dart';
+
+import '../support/noop_api.dart';
+
+FileData _data(String path, {required String id, int sizeBytes = 3}) => FileData(
+      id: id,
+      directory: path.substring(0, path.lastIndexOf('/')),
+      path: path,
+      createdAt: DateTime.utc(2026, 1, 1),
+      updatedAt: DateTime.utc(2026, 1, 1),
+      metadata: const {},
+      version: 1,
+      mimeType: 'image/png',
+      sizeBytes: sizeBytes,
+      uploadStatus: UploadStatus.complete,
+    );
+
+void main() {
+  late Directory tmp;
+
+  setUp(() => tmp = Directory.systemTemp.createTempSync('winche-cached-files'));
+  tearDown(() {
+    try {
+      tmp.deleteSync(recursive: true);
+    } catch (_) {
+      // Best effort: the store may still hold a handle on Windows.
+    }
+  });
+
+  OfflineCatalog catFor(WincheStorageApi api) => OfflineCatalog(
+        api: api,
+        store: MemoryStorageLocalStore(),
+        directoryResolver: () async => tmp.path,
+      );
+
+  /// A catalog and a reference to [path] on it, over a shared api.
+  ///
+  /// That api defaults to a bare [NoopApi], whose every method throws — so a
+  /// test that passes through this fixture is proof `cachedFiles()` never
+  /// reached the server.
+  (OfflineCatalog, ChildReference) fixture({
+    String path = 'u1',
+    WincheStorageApi? api,
+  }) {
+    final resolved = api ?? NoopApi();
+    final cat = catFor(resolved);
+    return (cat, ChildReference(path: path, api: resolved, catalog: cat));
+  }
+
+  /// Seeds a catalog row for [path]. [byteCount] bytes are written to disk —
+  /// pass null to write none, or a value other than [sizeBytes] for a partial.
+  Future<void> seed(
+    OfflineCatalog cat,
+    String path, {
+    required String id,
+    int sizeBytes = 3,
+    int? byteCount = 3,
+    CatalogStatus status = CatalogStatus.ready,
+  }) async {
+    final local = '${tmp.path}/$id.png';
+    if (byteCount != null) {
+      await File(local).writeAsBytes(List.filled(byteCount, 1));
+    }
+    await cat.debugPut(CatalogEntry(
+      data: _data(path, id: id, sizeBytes: sizeBytes),
+      localPath: local,
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: status,
+    ));
+  }
+
+  test('returns the direct children whose bytes are complete', () async {
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u1/photos/b.png', id: 'b'); // deeper — not a direct child
+    await seed(cat, 'u2/c.png', id: 'c'); // another directory
+    await seed(cat, 'u1/gone.png', id: 'gone', byteCount: null); // row, no bytes
+
+    final files = await ref.cachedFiles();
+
+    expect(files.map((f) => f.path), ['u1/a.png']);
+    expect(files.single.localPath, '${tmp.path}/a.png');
+    expect(files.single.data.id, 'a');
+    expect(files.single.cachedAt, DateTime.utc(2026, 1, 1));
+  });
+
+  test('is sorted by path', () async {
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/c.png', id: 'c');
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u1/b.png', id: 'b');
+
+    expect((await ref.cachedFiles()).map((f) => f.path),
+        ['u1/a.png', 'u1/b.png', 'u1/c.png']);
+  });
+
+  test('is empty when nothing under the path is cached', () async {
+    final (cat, ref) = fixture();
+    await seed(cat, 'u2/c.png', id: 'c');
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('reads a nested directory, not only a top-level one', () async {
+    // Every other test queries a single-segment path. Without this, the
+    // exclusion of `u1/photos/b.png` above could be passing for the wrong
+    // reason — a rule that drops everything below depth 1 would look identical.
+    final (cat, ref) = fixture(path: 'u1/photos');
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u1/photos/b.png', id: 'b');
+
+    expect((await ref.cachedFiles()).map((f) => f.path), ['u1/photos/b.png']);
+  });
+
+  test('is empty for a path that is itself a cached file', () async {
+    // A path is a file or a directory depending on which method you call on
+    // it. This one asks the directory question, and a file has no children.
+    final (cat, ref) = fixture(path: 'u1/a.png');
+    await seed(cat, 'u1/a.png', id: 'a');
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `dart test test/offline/cached_files_test.dart`
+Expected: 5 tests pass.
+
+- [ ] **Step 8: Run the full suite and analyzer**
+
+Run: `dart test && dart analyze`
+Expected: 186 tests pass; `No issues found!`
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add lib/src/offline/offline_catalog.dart lib/src/child_reference.dart test/offline/cached_files_test.dart
+git commit -m "docs: move the cache rationale onto the code it explains
+
+Plus two tests the review found missing: a nested directory, and a path
+that is itself a cached file."
+```
+
+---
+
 ## Task 3: Lock down the verification edges
 
-These tests pass the moment they are written, because Task 2 reuses
-`_verified`. That is the point: they pin the reuse, so a later refactor cannot
+These tests pass the moment they are written, because `cachedFilesIn` reuses
+`_verifiedFile`. That is the point: they pin the reuse, so a later refactor cannot
 quietly turn the list path into a row-only read that hands back paths which do
 not open. Write them, watch them pass, commit.
 
@@ -363,31 +606,25 @@ Append these inside `main()`, after the existing `test(...)` calls:
 ```dart
   test('skips a row whose bytes are the wrong length', () async {
     // A partial download: the row says ready, the disk disagrees. Disk wins.
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/a.png', id: 'a', sizeBytes: 3, byteCount: 2);
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     expect(await ref.cachedFiles(), isEmpty);
   });
 
   test('skips a stale row whose bytes never landed', () async {
     // What markPinDeferred leaves behind when an upload could not be staged.
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/a.png',
         id: 'a', byteCount: null, status: CatalogStatus.stale);
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     expect(await ref.cachedFiles(), isEmpty);
   });
 
   test('skips a downloading row that is still partial', () async {
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/a.png',
         id: 'a', sizeBytes: 3, byteCount: 1, status: CatalogStatus.downloading);
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     expect(await ref.cachedFiles(), isEmpty);
   });
@@ -395,10 +632,8 @@ Append these inside `main()`, after the existing `test(...)` calls:
   test('returns a downloading row whose bytes are complete', () async {
     // The process-kill case: the bytes landed, the frame that would have
     // flipped the row to ready died with the process. The bytes decide.
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/a.png', id: 'a', status: CatalogStatus.downloading);
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     expect((await ref.cachedFiles()).map((f) => f.path), ['u1/a.png']);
   });
@@ -412,8 +647,9 @@ Append these inside `main()`, after the existing `test(...)` calls:
 - [ ] **Step 2: Run them**
 
 Run: `dart test test/offline/cached_files_test.dart`
-Expected: 8 tests pass. If any of the first four fails, `_verified` is not
-being reused by `cachedFilesIn` — fix that rather than the test.
+Expected: 10 tests pass. If any of the first four new ones fails,
+`_verifiedFile` is not being reused by `cachedFilesIn` — fix that rather than
+the test.
 
 - [ ] **Step 3: Commit**
 
@@ -438,8 +674,7 @@ out N of these, so the fix ships with it.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add this fake class at the top of `test/offline/cached_files_test.dart`, after
-`_OfflineApi`:
+Add this fake class to `test/offline/cached_files_test.dart`, above `_data`:
 
 ```dart
 class _DeleteApi extends NoopApi {
@@ -457,10 +692,8 @@ And append these tests inside `main()`:
 
 ```dart
   test('a returned reference can drop its own cached copy', () async {
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, dir) = fixture();
     await seed(cat, 'u1/a.png', id: 'a');
-    final dir = ChildReference(path: 'u1', api: api, catalog: cat);
     final file = (await dir.cachedFiles()).single;
 
     await file.reference.clearCache();
@@ -474,9 +707,8 @@ And append these tests inside `main()`:
     // silently no-ops its local cleanup — the bytes and the row survive a
     // deletion that reported success.
     final api = _DeleteApi();
-    final cat = catFor(api);
+    final (cat, dir) = fixture(api: api);
     await seed(cat, 'u1/a.png', id: 'a');
-    final dir = ChildReference(path: 'u1', api: api, catalog: cat);
     final file = (await dir.cachedFiles()).single;
 
     expect(await file.reference.delete(), isTrue);
@@ -524,7 +756,7 @@ with:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `dart test test/offline/cached_files_test.dart`
-Expected: 10 tests pass.
+Expected: 12 tests pass.
 
 - [ ] **Step 5: Document what the fix does not cover**
 
@@ -551,7 +783,7 @@ with:
 - [ ] **Step 6: Run the full suite and analyzer**
 
 Run: `dart test && dart analyze`
-Expected: 191 tests pass; `No issues found!`
+Expected: 193 tests pass; `No issues found!`
 
 - [ ] **Step 7: Commit**
 
@@ -684,7 +916,7 @@ In `pubspec.yaml`, change line 4 from `version: 5.0.0` to `version: 5.1.0`.
 - [ ] **Step 7: Verify everything**
 
 Run: `dart test && dart analyze`
-Expected: 191 tests pass; `No issues found!`
+Expected: 193 tests pass; `No issues found!`
 
 Then run: `dart pub publish --dry-run`
 Expected: the package validates. This step is a sanity check on the version
@@ -703,7 +935,7 @@ git commit -m "docs: document cachedFiles() and release 5.1.0"
 
 ## Done
 
-`cachedFiles()` on `ChildReference`, 10 new tests (191 total), the
+`cachedFiles()` on `ChildReference`, 12 new tests (193 total), the
 `CachedFile.reference` fix, and a 5.1.0 release entry. No breaking change: a
 5.0.0 consumer compiles untouched, and the reference fix only changes behaviour
 where that behaviour was a `StateError` or a silent orphan.

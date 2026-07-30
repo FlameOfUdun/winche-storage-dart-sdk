@@ -104,12 +104,38 @@ be wrong.
 The one-level rule is also the only one expressible without inventing a
 directory model. The cache is flat: rows are keyed by full storage path
 (`sembast_storage_local_store.dart:16`) and the bytes are id-keyed under
-`<root>/winche/<storageKey>/storage/cache/` (`local_paths.dart:58`). "Directory"
-here is a substring of a key, nothing more.
+`<root>/winche/<storageKey>/storage/cache/` (`local_paths.dart:58`). There is no
+directory structure on disk, and the client derives the parent by taking
+everything before the final `/` of the row's key.
+
+**On `data.directory`.** Every row does carry a `directory` field — it is on
+`FileData`, so it is persisted through `CatalogEntry.toJson`. The parent is
+derived from the path anyway, deliberately: that field is the server's, nothing
+local keeps it in step with the key a row is stored under, and the existing
+suite already seeds rows where the two disagree
+(`test/offline/child_reference_offline_test.dart:23` sets `directory: 'd'` for
+path `a/b.png`). Nothing in `lib/` reads it today, and this feature does not
+start. The matching must be against the key, because the key is what the result
+is a list of.
 
 A path is a file or a directory depending on which method is called on it —
 already true of `getSnapshot()` vs `listChildren()`. `cachedFiles()` on a path
 that is itself a cached file returns an empty list, not that file.
+
+**Two edges of exact matching**, both documented rather than smoothed over:
+
+- A trailing slash matches nothing. `ChildReference.child()` concatenates
+  literally and nothing in `lib/` normalizes, so `child('photos/')` yields a
+  reference whose `cachedFiles()` is always empty — while `listChildren()` on
+  the same reference may well succeed, since it hands the path to a server that
+  can tolerate it. Normalizing here would be the only path normalization in the
+  package, applied at one call site; stating the constraint is honest and does
+  not create an inconsistency.
+- The derived parent of a slashless path is `''`, whereas `ChildReference`
+  models the root as `parent == null` rather than as an address. The two only
+  meet if a caller constructs `child('')` — which nothing in the API produces on
+  its own — and there it returns the root-level rows. Left alone: inventing a
+  root sentinel to reject would be more machinery than the case is worth.
 
 ### 2. Every row is verified against the disk
 
