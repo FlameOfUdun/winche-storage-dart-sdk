@@ -332,7 +332,7 @@ final class ChildReference {
   ///
   /// Matching is on the exact parent path, so `u1` never picks up `u10`'s
   /// files — and equally, a reference built with a trailing slash matches
-  /// nothing, since no path normalization happens anywhere in this package.
+  /// nothing, since nothing normalizes the path a reference carries.
   ///
   /// This reports what this device holds. It says nothing about what exists on
   /// the server — for that, [listChildren]. Requires a configured store.

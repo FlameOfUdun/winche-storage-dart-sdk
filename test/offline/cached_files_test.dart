@@ -118,10 +118,50 @@ void main() {
 
   test('is empty for a path that is itself a cached file', () async {
     // A path is a file or a directory depending on which method you call on
-    // it. This one asks the directory question, and a file has no children.
+    // it. Exact-parent matching makes this fall out for free — the value is as
+    // a guard on the prefix-matching reimplementation that would not.
     final (cat, ref) = fixture(path: 'u1/a.png');
     await seed(cat, 'u1/a.png', id: 'a');
 
     expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('skips a row whose bytes are the wrong length', () async {
+    // A partial download: the row says ready, the disk disagrees. Disk wins.
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a', sizeBytes: 3, byteCount: 2);
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('skips a stale row whose bytes never landed', () async {
+    // What markPinDeferred leaves behind when an upload could not be staged.
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png',
+        id: 'a', byteCount: null, status: CatalogStatus.stale);
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('skips a downloading row that is still partial', () async {
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png',
+        id: 'a', sizeBytes: 3, byteCount: 1, status: CatalogStatus.downloading);
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('returns a downloading row whose bytes are complete', () async {
+    // The process-kill case: the bytes landed, the frame that would have
+    // flipped the row to ready died with the process. The bytes decide.
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a', status: CatalogStatus.downloading);
+
+    expect((await ref.cachedFiles()).map((f) => f.path), ['u1/a.png']);
+  });
+
+  test('throws StateError without a configured store', () {
+    expect(ChildReference(path: 'u1', api: NoopApi()).cachedFiles,
+        throwsStateError);
   });
 }
