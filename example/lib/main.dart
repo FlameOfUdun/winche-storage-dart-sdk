@@ -176,23 +176,20 @@ class _HomePageState extends State<_HomePage>
   UploadTask? currentUploadTask;
   DownloadTask? currentDownloadTask;
 
-  /// When on, uploads are kept available offline (`cache: true`) — staged and
-  /// placed straight into the offline cache, no separate download roundtrip.
+  /// When on, uploads are also cached locally (`cache: true`) — staged and
+  /// placed straight into the file cache, no separate download roundtrip.
   bool cacheUploads = false;
 
   /// When on, file uploads are durable (`enqueue: true`) — queued, retried, and
   /// resumed after a restart, so they appear in the pending-transfers panel.
   bool queueUploads = true;
 
-  /// The current directory listing (server-only) paired with the set of paths
-  /// pinned for offline use (a separate cache-only read). Refreshed via [_reload].
-  late Future<(DirectorySnapshot, Set<String>)> _listing;
+  /// The current directory listing. Each file carries its own `isCached`, so
+  /// one read backs both tabs — no second cache-only listing to cross-reference.
+  /// Refreshed via [_reload].
+  late Future<DirectorySnapshot> _listing;
 
-  /// A cache-only listing via `offlineChildren()` — backs the "Cached" tab. Never
-  /// contacts the server. Refreshed via [_reload].
-  late Future<DirectorySnapshot> _cachedListing;
-
-  /// Switches the file view between the server listing and the cached listing.
+  /// Switches the file view between all files and the cached subset.
   late final TabController _tabController;
 
   /// Recent auto-resume transfer events (most recent first, capped).
@@ -200,7 +197,7 @@ class _HomePageState extends State<_HomePage>
   bool _eventsExpanded = false;
   StreamSubscription<TransferEvent>? _eventsSub;
 
-  /// Snapshot of the durable transfer queue (`storage.pendingTransfers()`).
+  /// Snapshot of the durable transfer queue (`storage.pendingUploads()`).
   List<TransferRecord> _pending = const [];
   bool _pendingExpanded = false;
 
@@ -209,7 +206,6 @@ class _HomePageState extends State<_HomePage>
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _listing = _loadListing();
-    _cachedListing = _loadCachedListing();
     _loadPending();
 
     // Observe the durable transfer queue as it drains (auto-resume).
@@ -234,26 +230,10 @@ class _HomePageState extends State<_HomePage>
     }
   }
 
-  /// The cache-only listing that backs the "Cached" tab.
-  ///
-  /// Guarded for the same reasons as the event subscription above:
-  /// `offlineChildren()` throws when unbound, and `StateError` when no store
-  /// is configured at all.
-  Future<DirectorySnapshot> _loadCachedListing() async {
-    try {
-      return await root.offlineChildren();
-    } on WincheUnboundException {
-      return _emptyListing();
-    } on StateError {
-      return _emptyListing();
-    }
-  }
-
   DirectorySnapshot _emptyListing() => DirectorySnapshot.fromFiles(
         const [],
         reference: root,
         timestamp: DateTime.now(),
-        fromCache: true,
       );
 
   @override
@@ -264,72 +244,52 @@ class _HomePageState extends State<_HomePage>
   }
 
   void _reload() {
-    setState(() {
-      _listing = _loadListing();
-      _cachedListing = root.offlineChildren();
-    });
+    setState(() => _listing = _loadListing());
   }
 
-  /// Loads the live server listing, plus the set of locally-pinned paths used to
-  /// annotate rows. get/list are server-only now, so the offline state comes from
-  /// a separate `offlineChildren()` (cache-only) read. When the server is
-  /// unreachable, falls back to the cached partial view.
-  Future<(DirectorySnapshot, Set<String>)> _loadListing() async {
-    final cached = await _cachedPaths();
+  /// Loads the server listing. Each returned file is already annotated with
+  /// whether this device has its bytes, so there is no second cache-only read
+  /// and no set of paths to cross-reference.
+  ///
+  /// Listings are never cached, so there is no offline fallback: when the
+  /// server is unreachable the error surfaces and the FutureBuilder renders it.
+  Future<DirectorySnapshot> _loadListing() async {
     try {
-      return (await root.listChildren(), cached);
-    } on StorageUnavailableException {
-      return (await root.offlineChildren(), cached);
+      return await root.listChildren();
     } on WincheUnboundException {
       // A sign-out landed while this was in flight. The page is being replaced
       // by the signed-out view, so there is nobody left to show a listing to —
       // and letting it escape makes it an unhandled async error rather than
       // something a FutureBuilder could render.
-      return (_emptyListing(), cached);
+      return _emptyListing();
     }
   }
 
-  /// The paths pinned for offline use directly under the root — a cache-only read
-  /// via `offlineChildren()`. Empty when no store is configured.
-  Future<Set<String>> _cachedPaths() async {
-    try {
-      final offline = await root.offlineChildren();
-      return offline.files.map((f) => f.reference.path).toSet();
-    } catch (_) {
-      return const {};
-    }
-  }
-
-  /// Loads the durable transfer-queue snapshot via `pendingTransfers()`.
+  /// Loads the durable upload-queue snapshot via `pendingUploads()`.
   Future<void> _loadPending() async {
     try {
-      final pending = await storage.pendingTransfers();
+      final pending = await storage.pendingUploads();
       if (mounted) setState(() => _pending = pending);
     } catch (_) {
       // No store configured — leave the snapshot empty.
     }
   }
 
-  /// Reattaches a tracked transfer's live handle (uploadFor / downloadFor) to
-  /// the progress banner — e.g. after a restart, when the original task object
-  /// is gone but the durable transfer is still resuming.
+  /// Reattaches a queued upload's live handle to the progress banner — e.g.
+  /// after a restart, when the original task object is gone but the durable
+  /// upload is still resuming.
+  ///
+  /// Uploads only: the queue holds nothing else. A download that did not
+  /// survive the process is not running, so there is nothing to reattach to —
+  /// `storage.downloadFor(path)` covers the in-session case instead.
   void _reattach(TransferRecord rec) {
     try {
-      if (rec.kind == TransferKind.upload) {
-        final t = storage.uploadFor(rec.path);
-        if (t == null) {
-          _snack('No live upload for ${rec.path}');
-          return;
-        }
-        setState(() => currentUploadTask = t);
-      } else {
-        final t = storage.downloadFor(rec.path);
-        if (t == null) {
-          _snack('No live download for ${rec.path}');
-          return;
-        }
-        setState(() => currentDownloadTask = t);
+      final t = storage.uploadFor(rec.path);
+      if (t == null) {
+        _snack('No live upload for ${rec.path}');
+        return;
       }
+      setState(() => currentUploadTask = t);
       _snack('Reattached: ${rec.path}');
     } catch (e) {
       _snack('Reattach failed: $e');
@@ -348,7 +308,7 @@ class _HomePageState extends State<_HomePage>
     switch (action) {
       case 'pin':
         try {
-          await ref.makeAvailableOffline();
+          await ref.keepCached();
           _reload();
           _snack('Pinned offline: ${ref.path}');
         } catch (e) {
@@ -356,14 +316,14 @@ class _HomePageState extends State<_HomePage>
         }
       case 'stale':
         try {
-          final status = await ref.offlineCopyStatus();
+          final status = await ref.checkForUpdate();
           _snack('Offline copy: ${status.name}');
         } catch (e) {
           _snack('Status check failed: $e');
         }
       case 'refresh':
         try {
-          await ref.refreshOfflineCopy();
+          await ref.refreshCache();
           _reload();
           _snack('Refreshed offline copy: ${ref.path}');
         } catch (e) {
@@ -373,7 +333,7 @@ class _HomePageState extends State<_HomePage>
         await _download(ref);
       case 'evict':
         try {
-          await ref.removeOfflineCopy();
+          await ref.clearCache();
           _reload();
           _snack('Evicted local copy: ${ref.path}');
         } catch (e) {
@@ -394,8 +354,11 @@ class _HomePageState extends State<_HomePage>
   Future<void> _download(ChildReference ref) async {
     final dir = await getApplicationDocumentsDirectory();
     final saveTo = p.join(dir.path, 'winche_downloads', ref.name);
-    // Durable: the download joins the queue and is reattachable via downloadFor.
-    setState(() => currentDownloadTask = ref.download(saveTo, enqueue: true));
+    // One-shot with in-session retry. Downloads are not persisted: the bytes
+    // stay authoritative on the server, so an interrupted download costs
+    // bandwidth to redo, never data. `downloadFor(path)` finds it again if this
+    // handle is lost while it runs.
+    setState(() => currentDownloadTask = ref.download(saveTo));
     try {
       await currentDownloadTask!.whenDone;
       _snack('Download complete: ${ref.path}');
@@ -412,7 +375,7 @@ class _HomePageState extends State<_HomePage>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Clear offline cache?'),
+        title: const Text('Clear the file cache?'),
         content: const Text(
           'Removes every pinned local copy. Files stay on the server.',
         ),
@@ -429,7 +392,7 @@ class _HomePageState extends State<_HomePage>
       ),
     );
     if (confirmed != true) return;
-    await storage.clearOfflineCache();
+    await storage.clearCache();
     _reload();
     _snack('Offline cache cleared');
   }
@@ -449,7 +412,7 @@ class _HomePageState extends State<_HomePage>
     final file = root.child("test-${DateTime.now().millisecondsSinceEpoch}");
     setState(() {
       // Prefer a file-backed upload: it joins the durable queue and shows up in
-      // pendingTransfers(). Fall back to bytes when no path is available (web).
+      // pendingUploads(). Fall back to bytes when no path is available (web).
       currentUploadTask = picked.path != null
           ? file.uploadPath(
               picked.path!,
@@ -481,71 +444,48 @@ class _HomePageState extends State<_HomePage>
     }
   }
 
-  /// The "Server" tab — a live `listChildren()` listing, annotated with which
-  /// paths are also cached, falling back to `offlineChildren()` when offline.
+  /// The "Server" tab — a live `listChildren()` listing. Each file is annotated
+  /// with whether this device holds its bytes. No offline fallback: listings
+  /// are never cached, so being offline is an error rather than a partial view.
   Widget _buildServerList() {
-    return FutureBuilder<(DirectorySnapshot, Set<String>)>(
+    return _buildList(emptyMessage: 'No files found');
+  }
+
+  /// The "Cached" tab — the same listing, filtered to the files this device has
+  /// bytes for. No second read: `isCached` rides along on every snapshot.
+  Widget _buildCachedList() {
+    return _buildList(
+      emptyMessage: 'No files cached for offline use',
+      where: (f) => f.isCached,
+    );
+  }
+
+  Widget _buildList({
+    required String emptyMessage,
+    bool Function(FileSnapshot)? where,
+  }) {
+    return FutureBuilder<DirectorySnapshot>(
       future: _listing,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
         if (snapshot.hasError) {
+          // Listings are server-only, so this is also what being offline looks
+          // like. There is no cached listing to fall back to by design — for
+          // offline-capable structured data, use winche_database.
           return Center(child: Text('Error loading files: ${snapshot.error}'));
         }
-        final (dir, cached) = snapshot.data!;
-        return Column(
-          children: [
-            if (dir.fromCache) _OfflineBanner(count: dir.length),
-            Expanded(
-              child: dir.isEmpty
-                  ? Center(
-                      child: Text(
-                        dir.fromCache
-                            ? 'No files pinned for offline use'
-                            : 'No files found',
-                      ),
-                    )
-                  : ListView.separated(
-                      itemCount: dir.length,
-                      separatorBuilder: (context, index) =>
-                          const Divider(height: 1),
-                      itemBuilder: (context, index) => _FileTile(
-                        file: dir.files[index],
-                        cached:
-                            cached.contains(dir.files[index].reference.path),
-                        onAction: _handleAction,
-                      ),
-                    ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  /// The "Cached" tab — a cache-only `offlineChildren()` listing. Never contacts
-  /// the server; shows only the files pinned for offline use under the root.
-  Widget _buildCachedList() {
-    return FutureBuilder<DirectorySnapshot>(
-      future: _cachedListing,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return Center(child: Text('Error loading cache: ${snapshot.error}'));
-        }
-        final dir = snapshot.data!;
-        if (dir.isEmpty) {
-          return const Center(child: Text('No files pinned for offline use'));
-        }
+        final files = where == null
+            ? snapshot.data!.files
+            : snapshot.data!.files.where(where).toList();
+        if (files.isEmpty) return Center(child: Text(emptyMessage));
         return ListView.separated(
-          itemCount: dir.length,
+          itemCount: files.length,
           separatorBuilder: (context, index) => const Divider(height: 1),
           itemBuilder: (context, index) => _FileTile(
-            file: dir.files[index],
-            cached: true,
+            file: files[index],
+            cached: files[index].isCached,
             onAction: _handleAction,
           ),
         );
@@ -588,7 +528,7 @@ class _HomePageState extends State<_HomePage>
               const PopupMenuDivider(),
               const PopupMenuItem(value: 'reload', child: Text('Reload list')),
               const PopupMenuItem(
-                  value: 'clear', child: Text('Clear offline cache')),
+                  value: 'clear', child: Text('Clear the file cache')),
             ],
           ),
         ],
@@ -737,43 +677,13 @@ class _TransferProgressBanner<S> extends StatelessWidget {
   }
 }
 
-/// Shown above the list when `list()` was served from the offline cache because
-/// the server was unreachable — a partial, pinned-only view.
-class _OfflineBanner extends StatelessWidget {
-  final int count;
-
-  const _OfflineBanner({required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      color: Colors.orange.shade100,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        children: [
-          const Icon(Icons.cloud_off, size: 18, color: Colors.orange),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Offline — showing $count pinned file(s) only '
-              '(stop the server to see this).',
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// One file row: an offline-state leading icon and an overflow menu exposing the
-/// full offline lifecycle (pin / stale / refresh / download / evict / delete).
+/// One file row: a cache-state leading icon and an overflow menu exposing the
+/// full cache lifecycle (cache / check / refresh / download / clear / delete).
 class _FileTile extends StatelessWidget {
   final FileSnapshot file;
 
-  /// Whether this path is pinned for offline use — supplied by the parent from a
-  /// separate `offlineChildren()` read, since the server-only listing no longer
-  /// carries cache state.
+  /// Whether this device holds the file's bytes. Comes straight off the
+  /// snapshot — the listing annotates every file, so no second read is needed.
   final bool cached;
   final Future<void> Function(FileSnapshot file, String action) onAction;
 
@@ -791,8 +701,10 @@ class _FileTile extends StatelessWidget {
       title: Text(file.reference.path),
       subtitle: Text(
         'Size: ${data.sizeBytes} bytes · ${data.mimeType} · ${data.contentHash}\n'
-        'Offline: $cached'
-        '${data.localPath != null ? ' (${data.localPath})' : ''}',
+        'Cached: $cached'
+        // localPath lives on the snapshot, not on FileData: it is this
+        // device's state, and FileData carries only what the server sent.
+        '${file.localPath != null ? ' (${file.localPath})' : ''}',
       ),
       isThreeLine: true,
       trailing: PopupMenuButton<String>(
@@ -879,7 +791,7 @@ class _TransferEventsFeed extends StatelessWidget {
 }
 
 /// A collapsible snapshot of the durable transfer queue, sourced from
-/// `storage.pendingTransfers()`. Each row is a not-yet-completed transfer
+/// `storage.pendingUploads()`. Each row is a not-yet-completed transfer
 /// (pending / running / failed-awaiting-retry).
 class _PendingTransfersPanel extends StatelessWidget {
   final List<TransferRecord> records;
@@ -926,7 +838,7 @@ class _PendingTransfersPanel extends StatelessWidget {
               child: records.isEmpty
                   ? const Padding(
                       padding: EdgeInsets.all(12),
-                      child: Text('No pending transfers'),
+                      child: Text('No pending uploads'),
                     )
                   : ListView(
                       shrinkWrap: true,
@@ -934,12 +846,8 @@ class _PendingTransfersPanel extends StatelessWidget {
                         for (final r in records)
                           ListTile(
                             dense: true,
-                            leading: Icon(
-                              r.kind == TransferKind.upload
-                                  ? Icons.upload
-                                  : Icons.download,
-                              size: 18,
-                            ),
+                            // The queue is an outbox: every record is an upload.
+                            leading: const Icon(Icons.upload, size: 18),
                             title: Text('${r.path} · ${r.status.name}'),
                             subtitle: Text(
                               'attempt ${r.attempt}'
