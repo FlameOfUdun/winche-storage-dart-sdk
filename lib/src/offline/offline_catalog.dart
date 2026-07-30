@@ -338,8 +338,19 @@ class OfflineCatalog implements UploadPinSink {
 
   // ── UploadPinSink implementation ──────────────────────────────────────────
 
-  ChildReference _refFor(String path) =>
-      ChildReference(path: path, api: _api, directoryResolver: _directoryResolver);
+  /// A reference carrying the collaborators this catalog holds, so a reference
+  /// handed out on a [CachedFile] can run cache operations — and so `delete()`
+  /// through one evicts the copy instead of orphaning it.
+  ///
+  /// No `controller`: the catalog does not hold one. It is wired the other way
+  /// round, in `WincheStorage._bind`, which sets `controller.pinSink = catalog`.
+  ChildReference _refFor(String path) => ChildReference(
+        path: path,
+        api: _api,
+        directoryResolver: _directoryResolver,
+        catalog: this,
+        registry: _registry,
+      );
 
   @override
   Future<String> stageUpload(String path, String sourceLocalPath) =>

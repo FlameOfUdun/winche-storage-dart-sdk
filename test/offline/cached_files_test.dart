@@ -6,6 +6,16 @@ import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
 
+class _DeleteApi extends NoopApi {
+  final deleted = <String>[];
+
+  @override
+  Future<bool> deleteFile(String path) async {
+    deleted.add(path);
+    return true;
+  }
+}
+
 FileData _data(String path, {required String id, int sizeBytes = 3}) => FileData(
       id: id,
       directory: path.substring(0, path.lastIndexOf('/')),
@@ -163,5 +173,32 @@ void main() {
   test('throws StateError without a configured store', () {
     expect(ChildReference(path: 'u1', api: NoopApi()).cachedFiles,
         throwsStateError);
+  });
+
+  test('a returned reference can drop its own cached copy', () async {
+    final (cat, dir) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    final file = (await dir.cachedFiles()).single;
+
+    await file.reference.clearCache();
+
+    expect(await dir.cachedFiles(), isEmpty);
+    expect(File('${tmp.path}/a.png').existsSync(), isFalse);
+  });
+
+  test('deleting through a returned reference leaves no orphan', () async {
+    // Without a catalog on the reference, delete() succeeds on the server and
+    // silently no-ops its local cleanup — the bytes and the row survive a
+    // deletion that reported success.
+    final api = _DeleteApi();
+    final (cat, dir) = fixture(api: api);
+    await seed(cat, 'u1/a.png', id: 'a');
+    final file = (await dir.cachedFiles()).single;
+
+    expect(await file.reference.delete(), isTrue);
+
+    expect(api.deleted, ['u1/a.png']);
+    expect(await dir.cachedFiles(), isEmpty);
+    expect(File('${tmp.path}/a.png').existsSync(), isFalse);
   });
 }

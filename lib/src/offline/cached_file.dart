@@ -9,6 +9,13 @@ import '../models/file_data.dart';
 /// answer, which is why [ChildReference.cachedFile] returns `CachedFile?`
 /// rather than a snapshot that has to be interrogated.
 final class CachedFile {
+  /// A reference to this file, wired for cache operations — `clearCache()`,
+  /// `refreshCache()` and `checkForUpdate()` all work on it, and `delete()`
+  /// evicts the local copy along with the remote one.
+  ///
+  /// It carries no upload queue, so `resumeUpload()` throws on it and
+  /// `delete()` will not cancel a queued upload for this path. Use
+  /// `storage.child(path)` when either matters.
   final ChildReference reference;
 
   /// The server record captured when the file was cached.
