@@ -322,6 +322,18 @@ final class ChildReference {
   /// configured store.
   Future<CachedFile?> cachedFile() => _requireCatalog().cachedFile(path);
 
+  /// The cached files directly under this path, sorted by path.
+  ///
+  /// Never contacts the server — the one directory-shaped read that works
+  /// offline. Returns an empty list when nothing here is cached; a file cached
+  /// at a deeper level is not included, and neither is a row whose bytes are
+  /// absent or incomplete, so every returned [CachedFile] has a `localPath`
+  /// that opens.
+  ///
+  /// This reports what this device holds. It says nothing about what exists on
+  /// the server — for that, [listChildren]. Requires a configured store.
+  Future<List<CachedFile>> cachedFiles() => _requireCatalog().cachedFilesIn(path);
+
   /// Caches this file's bytes, returning the existing copy when
   /// they are already complete. Downloads only when they are not — for an
   /// unconditional re-download use [refreshCache].

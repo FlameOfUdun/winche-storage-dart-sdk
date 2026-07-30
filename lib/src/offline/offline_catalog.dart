@@ -65,22 +65,24 @@ class OfflineCatalog implements UploadPinSink {
 
   /// The cached copy at [path], or null when this device has no usable bytes.
   ///
-  /// Verifies against the filesystem rather than trusting the row's status: the
-  /// disk is what actually answers "do I have these bytes", and this call is
-  /// about to hand out a path someone will open. It also means a row left
-  /// `downloading` by a process kill stops being a permanent blocker — the
-  /// bytes decide, so the next [pin] repairs it.
+  /// Absence is not an error: "I do not have these bytes" is an ordinary
+  /// answer, and a caller that gets one back has a `localPath` it can open —
+  /// which is what this call is for. A row this returns null for is repaired
+  /// by the next [pin].
   Future<CachedFile?> cachedFile(String path) async {
     final entry = await entryFor(path);
     if (entry == null) return null;
-    return _verified(entry);
+    return _verifiedFile(entry);
   }
 
   /// A [CachedFile] for [entry] when its bytes are complete on disk, else null.
   ///
-  /// The single definition of "usable bytes", shared by [cachedFile] and
+  /// The disk is what actually answers "do I have these bytes", so both cache
+  /// reads verify here rather than trusting the row's status — which is also
+  /// what stops a row left `downloading` by a process kill from being a
+  /// permanent blocker. One definition, shared by [cachedFile] and
   /// [cachedFilesIn] so the two cannot drift.
-  Future<CachedFile?> _verified(CatalogEntry entry) async {
+  Future<CachedFile?> _verifiedFile(CatalogEntry entry) async {
     final file = File(entry.localPath);
     if (!await file.exists()) return null;
     if (await file.length() != entry.data.sizeBytes) return null;
@@ -90,6 +92,30 @@ class OfflineCatalog implements UploadPinSink {
       localPath: entry.localPath,
       cachedAt: entry.pinnedAt,
     );
+  }
+
+  /// The cached files whose parent directory is exactly [directory], sorted by
+  /// path.
+  ///
+  /// One level only, mirroring a directory listing. Verified through
+  /// [_verifiedFile], so a row whose bytes are absent or incomplete is omitted
+  /// rather than returned in a degraded form.
+  Future<List<CachedFile>> cachedFilesIn(String directory) async {
+    final out = <CachedFile>[];
+    for (final entry in await all()) {
+      if (_parentDir(entry.path) != directory) continue;
+      final file = await _verifiedFile(entry);
+      if (file != null) out.add(file);
+    }
+    out.sort((a, b) => a.path.compareTo(b.path));
+    return out;
+  }
+
+  /// The parent directory of [p] — everything before the final `/` — or `''`
+  /// when [p] has no slash.
+  String _parentDir(String p) {
+    final i = p.lastIndexOf('/');
+    return i < 0 ? '' : p.substring(0, i);
   }
 
   /// Ensures [ref] is cached, returning the existing copy when the bytes are
