@@ -167,7 +167,7 @@ abstract class UploadTask {
   Future<FileData> _attemptOnce() async {
     // Pin-on-upload: stage a safe local copy and upload *from* it, so the
     // upload no longer depends on the caller's original file. Best-effort —
-    // on staging failure we upload from the original source and mark the pin
+    // on staging failure we upload from the original source and mark the copy
     // deferred after confirm.
     String? effPath = localPath;
     Uint8List? effBytes = bytes;
@@ -449,7 +449,7 @@ abstract class UploadTask {
     _closeStreams();
   }
 
-  /// Populates the offline cache for a pinned upload by invoking the finalize
+  /// Populates the file cache for a `cache: true` upload by invoking the finalize
   /// hook — which moves the staged copy into the id-keyed cache, or records a
   /// deferred entry when no staged copy survives (e.g. a resumed transfer whose
   /// staging was lost). Runs *before* the task completes, so `whenDone` resolves

@@ -70,21 +70,21 @@ final class WincheStorageConfig {
   /// Files larger than this are uploaded in multiple parts. Defaults to 5 MiB.
   final int multipartThreshold;
 
-  /// Use a non-persistent in-memory index (catalog + transfer queue) instead of
+  /// Use a non-persistent in-memory index (catalog + upload queue) instead of
   /// sembast. Files still go to disk. Defaults to false.
   final bool inMemory;
 
-  /// Initial backoff before the first durable-transfer retry. Defaults to 1s.
+  /// Initial backoff before the first durable-upload retry. Defaults to 1s.
   final Duration retryBaseDelay;
 
   /// Cap on the exponential backoff between retries. Defaults to 30s.
   final Duration retryMaxDelay;
 
-  /// How many times a failed transfer is retried before giving up permanently.
+  /// How many times a failed upload is retried before giving up permanently.
   /// Defaults to 5.
   final int retryMaxAttempts;
 
-  /// Interval of the backstop poll that re-drives failed transfers still within
+  /// Interval of the backstop poll that re-drives failed uploads still within
   /// the attempt cap. Defaults to 30s.
   final Duration retryPollInterval;
 
@@ -203,7 +203,7 @@ final class WincheStorage extends WincheStorageService {
         : _memoize(() async =>
             scopedRootPath(await root(), session.identity.storageKey));
 
-    // The durable queue + offline cache exist when there is somewhere to put a
+    // The upload queue + file cache exist when there is somewhere to put a
     // store: a directory (native), an in-memory index, or web (IndexedDB).
     final needsStore = _config.inMemory || root != null || _kIsWeb;
 
@@ -249,7 +249,6 @@ final class WincheStorage extends WincheStorageService {
     required StorageLocalStore? store,
     required Future<String> Function()? resolveDirectory,
   }) {
-    // Controller first, so the catalog can route pins through it.
     final controller = store == null
         ? null
         : TransferController(

@@ -13,7 +13,6 @@ final class DirectorySnapshot {
   /// One [FileSnapshot] per child file. Unmodifiable.
   final List<FileSnapshot> files;
 
-  /// When the snapshot was taken.
   final DateTime timestamp;
 
   const DirectorySnapshot._({

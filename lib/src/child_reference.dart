@@ -182,15 +182,16 @@ final class ChildReference {
   /// [mimeType] is optional — when omitted it is inferred from [localPath]'s
   /// extension via the `mime` package, falling back to `application/octet-stream`.
   ///
-  /// [enqueue] makes the upload durable: it joins the transfer queue, is deduped
+  /// [enqueue] makes the upload durable: it joins the outbox, is deduped
   /// by path, survives an app restart, and retries until it succeeds (so it can
   /// be started while offline). Requires a configured store, else throws
   /// `StateError`.
   ///
-  /// [cache] keeps the file available offline: the source is staged, uploaded
-  /// from the staged copy, then moved into the id-keyed offline cache on success
+  /// [cache] also keeps the bytes on this device: the source is staged, uploaded
+  /// from the staged copy, then moved into the id-keyed cache on success
   /// (best-effort — a caching failure leaves the upload successful and records a
-  /// stale pin). Requires a configured offline cache, else throws `StateError`.
+  /// row a later [keepCached] fills in). Requires a configured store, else
+  /// throws `StateError`.
   UploadTask uploadPath(
     String localPath, {
     String? mimeType,
@@ -247,10 +248,10 @@ final class ChildReference {
   ///
   /// [mimeType] is required when uploading bytes, as it cannot be inferred.
   ///
-  /// [cache] keeps the file available offline: the bytes are staged to disk
-  /// first, uploaded from the staged copy, then moved into the id-keyed offline
-  /// cache on success (best-effort). Requires a configured offline cache, else
-  /// throws `StateError`. Byte uploads are not durable — for a queued upload,
+  /// [cache] also keeps the bytes on this device: they are staged to disk
+  /// first, uploaded from the staged copy, then moved into the id-keyed cache
+  /// on success (best-effort). Requires a configured store, else throws
+  /// `StateError`. Byte uploads are not durable — for a queued upload,
   /// write the bytes to a file and use [uploadPath] with `enqueue: true`.
   UploadTask uploadBytes(
     Uint8List bytes,
@@ -291,9 +292,9 @@ final class ChildReference {
       DownloadTask.start(reference: this, saveTo: saveTo));
 
   /// Updates metadata on the server. Throws `StorageNotFoundException` when the
-  /// file does not exist. When this file is pinned offline, its cached metadata
-  /// is updated too (content fingerprint preserved), so offline reads stay
-  /// current — runs only after the server write succeeds.
+  /// file does not exist. When this file is cached, its cached metadata is
+  /// updated too (content fingerprint preserved) — runs only after the server
+  /// write succeeds.
   Future<FileSnapshot> updateMetadata(Map<String, dynamic> metadata) async {
     final updatedData = await api.updateMetadata(path, metadata);
     await catalog?.syncMetadata(path, updatedData.metadata);
@@ -303,9 +304,9 @@ final class ChildReference {
   /// Deletes from the server. Returns true if a file was deleted.
   ///
   /// Also cleans up local state once the server delete succeeds, so a deleted
-  /// file never leaves an orphan behind: evicts any offline copy (local file +
-  /// catalog entry) and drops any queued/in-flight transfer for this path.
-  /// No-ops when offline cache / auto-resume are off.
+  /// file never leaves an orphan behind: drops any cached copy (local file +
+  /// catalog row) and any queued upload for this path. No-ops when neither the
+  /// cache nor the queue is configured.
   Future<bool> delete() async {
     final deleted = await api.deleteFile(path);
     await catalog?.evict(path);
@@ -321,7 +322,7 @@ final class ChildReference {
   /// configured store.
   Future<CachedFile?> cachedFile() => _requireCatalog().cachedFile(path);
 
-  /// Caches this file's bytes for offline use, returning the existing copy when
+  /// Caches this file's bytes, returning the existing copy when
   /// they are already complete. Downloads only when they are not — for an
   /// unconditional re-download use [refreshCache].
   ///

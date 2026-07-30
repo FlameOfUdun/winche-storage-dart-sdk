@@ -74,7 +74,7 @@ class TransferController {
   bool get isClosed => _closed;
 
   /// Set by the facade after construction (the catalog is built later). Enables
-  /// finalizing pinned uploads on completion. Null when the file cache is off.
+  /// finalizing `cache: true` uploads on completion. Null when the cache is off.
   UploadPinSink? pinSink;
 
   Stream<TransferEvent> get events => _events.stream;
@@ -113,8 +113,8 @@ class TransferController {
       httpClient: _httpClient,
       stageSource:
           sink == null ? null : () => sink.stageUpload(ref.path, localPath),
-      // Finalize the pin within the task (before whenDone), so a completed
-      // tracked upload guarantees its cached copy is committed.
+      // Finalize within the task (before whenDone), so a completed tracked
+      // upload guarantees its cached copy is committed.
       onPinFinalize: sink == null
           ? null
           : (confirmed) => sink.finalizeUploadPin(ref.path, confirmed),
@@ -248,8 +248,8 @@ class TransferController {
     switch (task.transferState) {
       case ManagedTransferState.complete:
         // Nothing to do: the handle ran `onBeforeComplete` — dropping the
-        // record and emitting `completed` — before it completed, and a `pinned`
-        // upload finalized its cache copy via onPinFinalize before that. Both
+        // record and emitting `completed` — before it completed, and a cached
+        // upload committed its copy via onPinFinalize before that. Both
         // are settled by the time a caller's `whenDone` resolves.
         break;
       case ManagedTransferState.cancelled:
@@ -353,7 +353,7 @@ class TransferController {
           metadata: rec.metadata,
           multipartThreshold: rec.multipartThreshold ?? _multipartThreshold,
           httpClient: _httpClient,
-          // Resumed pinned upload: finalize from the staged copy (or record a
+          // Resumed cached upload: finalize from the staged copy (or record a
           // deferred entry) within the task, before whenDone.
           onPinFinalize: (rec.pinned && pinSink != null)
               ? (confirmed) => pinSink!.finalizeUploadPin(rec.path, confirmed)

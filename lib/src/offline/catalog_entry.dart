@@ -1,10 +1,10 @@
 import '../models/file_data.dart';
 
-/// Lifecycle of a pinned offline file.
+/// Lifecycle of a cached file's bytes.
 enum CatalogStatus { downloading, ready, stale }
 
-/// A pinned file tracked by the offline catalog: the remote [data] captured at
-/// pin/refresh time, plus where it lives locally.
+/// A cached file: the server record captured when it was cached, plus where
+/// its bytes live locally.
 class CatalogEntry {
   final FileData data;
   final String localPath;
@@ -31,7 +31,7 @@ class CatalogEntry {
   String get path => data.path;
   String get id => data.id;
 
-  /// True when the content has finished downloading and is ready for offline use.
+  /// True when the bytes have finished downloading.
   bool get isCached => status == CatalogStatus.ready;
 
   CatalogEntry copyWith({

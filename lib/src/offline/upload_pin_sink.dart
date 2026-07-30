@@ -1,7 +1,7 @@
 import '../models/file_data.dart';
 
-/// The bridge [TransferController] uses to populate the offline cache for a
-/// pinned upload, without depending on [OfflineCatalog] directly. All methods
+/// The bridge [TransferController] uses to populate the file cache for a
+/// `cache: true` upload, without depending on [OfflineCatalog] directly. All methods
 /// are keyed by the reference path (the upload's durable identity).
 abstract interface class UploadPinSink {
   /// Stages [sourceLocalPath] into the cache and returns the staged path.

@@ -9,7 +9,6 @@ import '../models/file_data.dart';
 /// answer, which is why [ChildReference.cachedFile] returns `CachedFile?`
 /// rather than a snapshot that has to be interrogated.
 final class CachedFile {
-  /// The reference this copy belongs to.
   final ChildReference reference;
 
   /// The server record captured when the file was cached.
@@ -21,7 +20,6 @@ final class CachedFile {
   /// Absolute path to the bytes on this device.
   final String localPath;
 
-  /// When the bytes were committed to the cache.
   final DateTime cachedAt;
 
   const CachedFile({

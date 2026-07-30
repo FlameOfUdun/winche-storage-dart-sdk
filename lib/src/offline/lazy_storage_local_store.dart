@@ -16,7 +16,6 @@ class LazyStorageLocalStore implements StorageLocalStore {
   Future<StorageLocalStore>? _opened;
   bool _closed = false;
 
-  /// Whether [close] has been called.
   bool get isClosed => _closed;
 
   Future<StorageLocalStore> _ensure() => _opened ??= _open();

@@ -6,8 +6,8 @@ import 'storage_local_store.dart';
 /// Durable [StorageLocalStore] backed by sembast. Pure Dart; works on native
 /// (file) and web (IndexedDB) via the platform-selected factory.
 ///
-/// A single sembast database holds three stores: the offline catalog keyed by
-/// reference path, the transfer queue keyed by sequence number, and metadata.
+/// A single sembast database holds three stores: the file cache keyed by
+/// reference path, the upload queue keyed by sequence number, and metadata.
 class SembastStorageLocalStore implements StorageLocalStore {
   SembastStorageLocalStore._(this._db);
 

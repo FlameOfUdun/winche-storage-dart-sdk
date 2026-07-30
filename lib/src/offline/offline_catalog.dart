@@ -17,10 +17,12 @@ import 'local_paths.dart';
 import 'storage_local_store.dart';
 import 'upload_pin_sink.dart';
 
-/// Tracks files pinned for offline availability. Owns an id-keyed cache
-/// directory rooted at [_directoryResolver] — which resolves to the caller's
-/// identity-scoped root — with files at `<root>/cache/<id><.ext>` and
-/// in-progress pinned uploads at `<root>/staging/<hash>`.
+/// The file cache: which files this device holds bytes for, and where.
+///
+/// Owns an id-keyed cache directory rooted at [_directoryResolver] — which
+/// resolves to the caller's identity-scoped root — with files at
+/// `<root>/cache/<id><.ext>` and in-progress cached uploads at
+/// `<root>/staging/<hash>`.
 class OfflineCatalog implements UploadPinSink {
   OfflineCatalog({
     required WincheStorageApi api,
@@ -133,7 +135,7 @@ class OfflineCatalog implements UploadPinSink {
     final resolver = _directoryResolver;
     if (resolver == null) {
       throw StateError(
-          'directoryResolver is required to store files for offline use.');
+          'directoryResolver is required to cache files on this device.');
     }
     final localPath = await _cachePath(await resolver(), remote, ref.name);
 
@@ -210,11 +212,11 @@ class OfflineCatalog implements UploadPinSink {
         : CacheStatus.contentChanged;
   }
 
-  /// Updates a pinned file's cached metadata after a successful server write,
+  /// Updates a cached file's metadata after a successful server write,
   /// so offline reads ([offlineSnapshot]/[offlineChildren]) stay current. Only
   /// the metadata is touched — the content fingerprint (and every byte-identity
   /// field) is preserved, so [offlineCopyStatus] still correctly flags stale
-  /// cached *bytes* even if the server content changed too. No-op when not pinned.
+  /// cached *bytes* even if the server content changed too. No-op when not cached.
   Future<void> syncMetadata(String path, Map<String, dynamic> metadata) async {
     final entry = await entryFor(path);
     if (entry == null) return;
@@ -234,7 +236,7 @@ class OfflineCatalog implements UploadPinSink {
     await _store.removeCatalog(path);
   }
 
-  /// Evicts every pinned file.
+  /// Deletes every cached file.
   Future<void> clear() async {
     for (final entry in await all()) {
       await evict(entry.path);
@@ -245,13 +247,13 @@ class OfflineCatalog implements UploadPinSink {
     final resolver = _directoryResolver;
     if (resolver == null) {
       throw StateError(
-          'directoryResolver is required to store files for offline use.');
+          'directoryResolver is required to cache files on this device.');
     }
     return resolver();
   }
 
   /// The `cache/` path for [data] under the scoped [root], with its directory
-  /// created. Downloads and pin finalization both write here, and neither can
+  /// created. Downloads and upload finalization both write here, and neither can
   /// assume the directory already exists.
   Future<String> _cachePath(
       String root, FileData data, String sourceName) async {
@@ -312,7 +314,7 @@ class OfflineCatalog implements UploadPinSink {
 
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Finalizes a pinned upload: moves the staged copy to the id-keyed cache path
+  /// Finalizes a `cache: true` upload: moves the staged copy to the id-keyed path
   /// and records a `ready` entry. Idempotent — if the final file already exists
   /// it just (re)writes the entry. Falls back to a `stale` entry (a later
   /// [refresh] fills it in) when neither a staged nor a final file is present.
@@ -339,7 +341,7 @@ class OfflineCatalog implements UploadPinSink {
     ));
   }
 
-  /// Records a `stale` entry for a pin that could not be populated from the
+  /// Records a `stale` entry for a cached copy that could not be populated from the
   /// upload source. A later [refresh]/[pin] downloads it and flips it to ready.
   Future<void> markPinDeferred(ChildReference ref, FileData confirmed) async {
     final finalPath =

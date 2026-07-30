@@ -39,7 +39,7 @@ abstract interface class ManagedTransfer {
   ///
   /// Without it the record is removed just *after* `runOnce` returns, so
   /// `await task.whenDone` followed by `pendingTransfers()` could still see the
-  /// finished transfer. Same contract as the pinned upload's `onPinFinalize`:
+  /// finished transfer. Same contract as a cached upload's `onPinFinalize`:
   /// a completed transfer has fully landed.
   abstract Future<void> Function()? onBeforeComplete;
 }

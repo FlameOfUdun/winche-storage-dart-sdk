@@ -76,7 +76,7 @@ String _stableHash(String s) {
   return hash.toRadixString(16).padLeft(8, '0');
 }
 
-/// The staging path for an in-progress pinned upload of [refPath]. Lives under a
+/// The staging path for an in-progress cached upload of [refPath]. Lives under a
 /// `staging/` subdir of [directory], keyed by a stable hash of [refPath] (unique
 /// per upload target) and intentionally extension-free. Deterministic, so a
 /// resumed upload recomputes the same path.

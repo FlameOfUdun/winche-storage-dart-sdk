@@ -5,7 +5,7 @@ import 'transfer_event.dart';
 /// Tracks live transfers that the durable queue does not: every download, and
 /// any upload started without `enqueue:`.
 ///
-/// Two jobs, which used to be one:
+/// Two jobs:
 ///
 /// * **Teardown.** Left running past `close()` a task would keep writing bytes
 ///   to the caller's chosen destination after the SDK was torn down — and,
