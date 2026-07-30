@@ -229,23 +229,68 @@ void main() {
 Run: `dart test test/offline/cached_files_test.dart`
 Expected: compile error — `The method 'cachedFiles' isn't defined for the type 'ChildReference'`.
 
-- [ ] **Step 3: Add `cachedFilesIn` to the catalog**
+- [ ] **Step 3: Rename the helper and move the rationale onto it**
 
-In `lib/src/offline/offline_catalog.dart`, immediately after the `_verified`
-helper added in Task 1:
+Carried over from Task 1's code review. After the extraction, `cachedFile()`'s
+doc comment still explains why verification happens against the disk — but it
+no longer verifies anything, and `cachedFilesIn` is about to inherit the same
+rule. Rationale that belongs to the helper has to live on the helper, or it
+gets restated on both callers. The name changes at the same time: `_verified`
+reads as a predicate while returning `Future<CachedFile?>`, and the file's
+other private helpers are noun phrases (`_refFor`, `_cachePath`).
+
+In `lib/src/offline/offline_catalog.dart`, replace both methods added in
+Task 1 with:
 
 ```dart
-  /// The verified cached files whose parent directory is exactly [directory],
-  /// sorted by path.
+  /// The cached copy at [path], or null when this device has no usable bytes.
   ///
-  /// One level only, mirroring a directory listing. Rows whose bytes are
-  /// absent or incomplete are omitted rather than returned in a degraded form,
-  /// so every element has a `localPath` that opens.
+  /// Absence is not an error: "I do not have these bytes" is an ordinary
+  /// answer, and a caller that gets one back has a `localPath` it can open —
+  /// which is what this call is for. A row this returns null for is repaired
+  /// by the next [pin].
+  Future<CachedFile?> cachedFile(String path) async {
+    final entry = await entryFor(path);
+    if (entry == null) return null;
+    return _verifiedFile(entry);
+  }
+
+  /// A [CachedFile] for [entry] when its bytes are complete on disk, else null.
+  ///
+  /// The disk is what actually answers "do I have these bytes", so both cache
+  /// reads verify here rather than trusting the row's status — which is also
+  /// what stops a row left `downloading` by a process kill from being a
+  /// permanent blocker. One definition, shared by [cachedFile] and
+  /// [cachedFilesIn] so the two cannot drift.
+  Future<CachedFile?> _verifiedFile(CatalogEntry entry) async {
+    final file = File(entry.localPath);
+    if (!await file.exists()) return null;
+    if (await file.length() != entry.data.sizeBytes) return null;
+    return CachedFile(
+      reference: _refFor(entry.path),
+      data: entry.data,
+      localPath: entry.localPath,
+      cachedAt: entry.pinnedAt,
+    );
+  }
+```
+
+- [ ] **Step 4: Add `cachedFilesIn` to the catalog**
+
+In `lib/src/offline/offline_catalog.dart`, immediately after `_verifiedFile`:
+
+```dart
+  /// The cached files whose parent directory is exactly [directory], sorted by
+  /// path.
+  ///
+  /// One level only, mirroring a directory listing. Verified through
+  /// [_verifiedFile], so a row whose bytes are absent or incomplete is omitted
+  /// rather than returned in a degraded form.
   Future<List<CachedFile>> cachedFilesIn(String directory) async {
     final out = <CachedFile>[];
     for (final entry in await all()) {
       if (_parentDir(entry.path) != directory) continue;
-      final file = await _verified(entry);
+      final file = await _verifiedFile(entry);
       if (file != null) out.add(file);
     }
     out.sort((a, b) => a.path.compareTo(b.path));
@@ -263,7 +308,7 @@ helper added in Task 1:
 The stats run sequentially on purpose: `Future.wait` over them saves
 microseconds and risks a file-descriptor storm on a large directory.
 
-- [ ] **Step 4: Add the `ChildReference` delegate**
+- [ ] **Step 5: Add the `ChildReference` delegate**
 
 In `lib/src/child_reference.dart`, directly after the `cachedFile()` method
 (currently line 323):
@@ -282,17 +327,17 @@ In `lib/src/child_reference.dart`, directly after the `cachedFile()` method
   Future<List<CachedFile>> cachedFiles() => _requireCatalog().cachedFilesIn(path);
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `dart test test/offline/cached_files_test.dart`
 Expected: 3 tests pass.
 
-- [ ] **Step 6: Run the full suite and analyzer**
+- [ ] **Step 7: Run the full suite and analyzer**
 
 Run: `dart test && dart analyze`
 Expected: 184 tests pass; `No issues found!`
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/src/offline/offline_catalog.dart lib/src/child_reference.dart test/offline/cached_files_test.dart
