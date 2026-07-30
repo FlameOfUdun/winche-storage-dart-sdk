@@ -244,7 +244,13 @@ class _HomePageState extends State<_HomePage>
   }
 
   void _reload() {
-    setState(() => _listing = _loadListing());
+    // A block body, not an arrow: `setState(() => _listing = _loadListing())`
+    // returns the assigned Future, and Flutter asserts that a setState callback
+    // returns nothing. The assignment would still land, so the failure shows up
+    // only as a list that doesn't repaint until something else rebuilds it.
+    setState(() {
+      _listing = _loadListing();
+    });
   }
 
   /// Loads the server listing. Each returned file is already annotated with
@@ -310,14 +316,14 @@ class _HomePageState extends State<_HomePage>
         try {
           await ref.keepCached();
           _reload();
-          _snack('Pinned offline: ${ref.path}');
+          _snack('Cached: ${ref.path}');
         } catch (e) {
-          _snack('Pin failed: $e');
+          _snack('Caching failed: $e');
         }
       case 'stale':
         try {
           final status = await ref.checkForUpdate();
-          _snack('Offline copy: ${status.name}');
+          _snack('Cached copy: ${status.name}');
         } catch (e) {
           _snack('Status check failed: $e');
         }
@@ -325,7 +331,7 @@ class _HomePageState extends State<_HomePage>
         try {
           await ref.refreshCache();
           _reload();
-          _snack('Refreshed offline copy: ${ref.path}');
+          _snack('Refreshed cache: ${ref.path}');
         } catch (e) {
           _snack('Refresh failed: $e');
         }
@@ -335,9 +341,9 @@ class _HomePageState extends State<_HomePage>
         try {
           await ref.clearCache();
           _reload();
-          _snack('Evicted local copy: ${ref.path}');
+          _snack('Cleared cached copy: ${ref.path}');
         } catch (e) {
-          _snack('Evict failed: $e');
+          _snack('Clearing the cache failed: $e');
         }
       case 'delete':
         try {
@@ -710,11 +716,11 @@ class _FileTile extends StatelessWidget {
       trailing: PopupMenuButton<String>(
         onSelected: (action) => onAction(file, action),
         itemBuilder: (context) => const [
-          PopupMenuItem(value: 'pin', child: Text('Make available offline')),
-          PopupMenuItem(value: 'stale', child: Text('Check if stale')),
-          PopupMenuItem(value: 'refresh', child: Text('Refresh offline copy')),
+          PopupMenuItem(value: 'pin', child: Text('Keep cached')),
+          PopupMenuItem(value: 'stale', child: Text('Check for update')),
+          PopupMenuItem(value: 'refresh', child: Text('Refresh cache')),
           PopupMenuItem(value: 'download', child: Text('Download to path')),
-          PopupMenuItem(value: 'evict', child: Text('Evict local copy')),
+          PopupMenuItem(value: 'evict', child: Text('Clear cached copy')),
           PopupMenuItem(value: 'delete', child: Text('Delete')),
         ],
       ),

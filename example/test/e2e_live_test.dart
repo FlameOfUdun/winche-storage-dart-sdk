@@ -67,6 +67,15 @@ void main() {
         );
         return;
       }
+      // TestWidgetsFlutterBinding installs an HttpOverrides that answers every
+      // request with 400 and never touches the network. This suite's assertions
+      // are about identity binding, which needs no HTTP -- but leaving the stub
+      // in place means the listings behind them are quietly failing, so the
+      // "live" in the file name would be a lie.
+      final savedOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = savedOverrides);
+
       tester.view.physicalSize = const Size(1400, 2200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
