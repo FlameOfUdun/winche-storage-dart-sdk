@@ -12,6 +12,7 @@ import '../tasks/download_task.dart';
 import 'cache_status.dart';
 import 'cached_file.dart';
 import 'catalog_entry.dart';
+import 'live_task_registry.dart';
 import 'local_paths.dart';
 import 'storage_local_store.dart';
 import 'upload_pin_sink.dart';
@@ -26,15 +27,27 @@ class OfflineCatalog implements UploadPinSink {
     required StorageLocalStore store,
     required Future<String> Function()? directoryResolver,
     int multipartThreshold = 5 * 1024 * 1024, // accepted for API symmetry; downloads don't use it
+    LiveTaskRegistry? registry,
     Dio? httpClient,
   })  : _api = api,
         _store = store,
         _directoryResolver = directoryResolver,
+        _registry = registry,
         _httpClient = httpClient;
 
   final WincheStorageApi _api;
   final StorageLocalStore _store;
   final Future<String> Function()? _directoryResolver;
+
+  /// Tracks cache fills so teardown can abort them, and so they are visible on
+  /// `transferEvents` like any other transfer.
+  ///
+  /// Without this a fill started before a sign-out keeps writing into the cache
+  /// path after the session is gone — and the next session's fill for the same
+  /// file writes to the same place concurrently, producing a file that is the
+  /// partial plus a whole second copy.
+  final LiveTaskRegistry? _registry;
+
   final Dio? _httpClient;
 
   /// In-flight downloads keyed by path — de-dups concurrent cache/refresh calls.
@@ -143,13 +156,16 @@ class OfflineCatalog implements UploadPinSink {
       etag: canResume ? previous?.etag : null,
     ));
 
-    final task = DownloadTask.start(
+    final started = DownloadTask.start(
       reference: ref,
       saveTo: localPath,
       httpClient: _httpClient,
       isResume: canResume,
       ifRangeEtag: canResume ? previous?.etag : null,
     );
+    // Tracked so teardown aborts it. An untracked fill outlives its session and
+    // races the next one for the same cache path.
+    final task = _registry?.addDownload(ref.path, started) ?? started;
 
     await task.whenDone; // throws on failure — the row stays `downloading`.
 

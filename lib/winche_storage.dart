@@ -271,6 +271,9 @@ final class WincheStorage extends WincheStorageService {
             store: store,
             directoryResolver: resolveDirectory,
             multipartThreshold: _config.multipartThreshold,
+            // So a cache fill is aborted with everything else on teardown, and
+            // shows up on transferEvents like any other transfer.
+            registry: _oneShots,
           );
     if (controller != null && catalog != null) controller.pinSink = catalog;
 
