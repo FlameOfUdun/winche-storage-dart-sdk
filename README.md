@@ -403,6 +403,21 @@ await photoRef.clearCache();
 await storage.clearCache();
 ```
 
+Annotation on `listChildren()` covers the multi-file case while the server is
+reachable. When it is not, `cachedFiles()` answers the same question from disk
+alone:
+
+```dart
+// What this device already has directly under a directory. No network, so
+// this works offline — and every localPath opens.
+for (final CachedFile f in await dir.cachedFiles()) {
+  print('${f.path} → ${f.localPath}');
+}
+```
+
+One level, like a listing. A file cached at a deeper path is not included, and
+neither is a row whose bytes are missing or partial.
+
 `keepCached()` caches exactly one file. To cache a directory's contents, list it
 and loop — which is also the only way to bound the concurrency yourself:
 
@@ -626,8 +641,9 @@ store additionally throw `StateError` when none is configured.
 | `parent` | The parent reference, or `null` at a single-segment path. |
 | `child(path)` | Returns a new `ChildReference` at `this.path/path`. |
 | `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws `StorageUnavailableException` when offline. |
-| `listChildren({mimeType})` | Lists files under this path from the **server**, returning a `DirectorySnapshot` whose `.files` each carry `isCached` / `localPath`; throws when offline. |
+| `listChildren({mimeType})` | Lists files under this path from the **server**, returning a `DirectorySnapshot` whose `.files` each carry `isCached` / `localPath`; throws when offline. For what is on disk without a network call, use `cachedFiles()`. |
 | `cachedFile()` | `Future<CachedFile?>` — the local copy, or `null` when this device has no usable bytes. Never contacts the server; verified against the disk, so a returned `localPath` always opens. Requires a store. |
+| `cachedFiles()` | `Future<List<CachedFile>>` — the cached files **directly under** this path, sorted by path and each verified against the disk. Never contacts the server, so it is the one directory-shaped read that works offline. Empty when nothing here is cached. Requires a store. |
 | `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws `StorageNotFoundException` when the server has no record, and `StorageFailedPreconditionException` when it has a record but no bytes. Requires a store. |
 | `refreshCache()` | Unconditionally re-downloads the current remote version. Requires a store. |
 | `checkForUpdate()` | `Future<CacheStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `remoteIncomplete` / `unknown` (offline). **Round-trips**, unlike the other cache methods. Requires a store. |

@@ -149,7 +149,9 @@ final class ChildReference {
   /// what is available offline.
   ///
   /// Always live — listings are never cached — so this throws
-  /// `StorageUnavailableException` when the server is unreachable.
+  /// `StorageUnavailableException` when the server is unreachable. For what
+  /// this device already holds under this path, which needs no network, use
+  /// [cachedFiles].
   Future<DirectorySnapshot> listChildren({String? mimeType}) async {
     final timestamp = DateTime.now();
     final files = await api.listDirectory(path, mimeType: mimeType);

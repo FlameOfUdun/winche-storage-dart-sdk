@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## 5.1.0
+
+### Added: `ChildReference.cachedFiles()`
+
+`Future<List<CachedFile>>` — the cached files directly under a path, sorted by
+path, each verified against the disk so every `localPath` opens.
+
+5.0.0 removed `offlineChildren()` on the grounds that a server listing
+annotated with `isCached` covers the multi-file case. It does, but only while
+the server is reachable: `listChildren()` throws when offline, so at the moment
+the cache matters most there was no way to ask what was in it. This is that
+read. It is not a listing — it reports what this device holds, makes no claim
+about what exists on the server, and never calls `listDirectory`.
+
+One level only, like a listing. Rows whose bytes are absent or incomplete are
+omitted rather than returned in a degraded form.
+
+```dart
+for (final f in await dir.cachedFiles()) {
+  print('${f.path} → ${f.localPath}');
+}
+```
+
+### Fixed: cache operations on `CachedFile.reference`
+
+The reference carried by a `CachedFile` was built without the catalog, so
+`clearCache()`, `refreshCache()`, `keepCached()`, `cachedFile()` and
+`checkForUpdate()` all threw `StateError` on an object obtained *from the
+cache* — and `delete()` through one deleted the file on the server, then
+silently skipped its local cleanup, leaving the bytes and the catalog row
+behind as an orphan that still reported as cached.
+
+It now carries the catalog. It still carries no upload queue, so
+`resumeUpload()` throws on it and `delete()` will not cancel a queued upload
+for that path — use `storage.child(path)` when either matters.
+
 ## 5.0.0
 
 Built on `winche_core`. Storage is now bound to whichever identity is signed
