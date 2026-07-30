@@ -11,11 +11,21 @@ class CatalogEntry {
   final DateTime pinnedAt;
   final CatalogStatus status;
 
+  /// The object ETag from the response that produced these bytes, when the
+  /// server sent one.
+  ///
+  /// Used for `If-Range` on a resumed download, so a server-side overwrite
+  /// cannot be appended to a stale partial. Null on rows written before this
+  /// field existed, and on servers that send no ETag — the `contentHash`
+  /// comparison covers both cases.
+  final String? etag;
+
   const CatalogEntry({
     required this.data,
     required this.localPath,
     required this.pinnedAt,
     required this.status,
+    this.etag,
   });
 
   String get path => data.path;
@@ -29,12 +39,14 @@ class CatalogEntry {
     String? localPath,
     DateTime? pinnedAt,
     CatalogStatus? status,
+    String? etag,
   }) =>
       CatalogEntry(
         data: data ?? this.data,
         localPath: localPath ?? this.localPath,
         pinnedAt: pinnedAt ?? this.pinnedAt,
         status: status ?? this.status,
+        etag: etag ?? this.etag,
       );
 
   Map<String, Object?> toJson() => {
@@ -42,6 +54,7 @@ class CatalogEntry {
         'localPath': localPath,
         'pinnedAt': pinnedAt.toIso8601String(),
         'status': status.name,
+        'etag': etag,
       };
 
   factory CatalogEntry.fromJson(Map<String, Object?> json) => CatalogEntry(
@@ -50,5 +63,6 @@ class CatalogEntry {
         localPath: json['localPath'] as String,
         pinnedAt: DateTime.parse(json['pinnedAt'] as String),
         status: CatalogStatus.values.byName(json['status'] as String),
+        etag: json['etag'] as String?,
       );
 }

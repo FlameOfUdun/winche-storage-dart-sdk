@@ -62,12 +62,14 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  test('offlineCopyStatus: notPinned when nothing is cached', () async {
+  test('checkForUpdate: unknown when nothing is cached', () async {
+    // Nothing to compare against. "Not cached" is cachedFile() == null, which
+    // needs no round-trip, so it is not one of this method's answers.
     final cat = build({'a/b.png': _data('a/b.png')});
-    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.notPinned);
+    expect(await cat.checkForUpdate('a/b.png'), CacheStatus.unknown);
   });
 
-  test('offlineCopyStatus: upToDate when hashes match', () async {
+  test('checkForUpdate: upToDate when hashes match', () async {
     final cat = build({'a/b.png': _data('a/b.png', hash: 'h1')});
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
@@ -75,10 +77,10 @@ void main() {
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.upToDate);
+    expect(await cat.checkForUpdate('a/b.png'), CacheStatus.upToDate);
   });
 
-  test('offlineCopyStatus: contentChanged when remote hash differs', () async {
+  test('checkForUpdate: contentChanged when remote hash differs', () async {
     final cat = build({'a/b.png': _data('a/b.png', hash: 'h2')});
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
@@ -86,11 +88,11 @@ void main() {
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(await cat.offlineCopyStatus('a/b.png'),
-        OfflineCopyStatus.contentChanged);
+    expect(await cat.checkForUpdate('a/b.png'),
+        CacheStatus.contentChanged);
   });
 
-  test('offlineCopyStatus: remoteDeleted when the server has no record',
+  test('checkForUpdate: remoteDeleted when the server has no record',
       () async {
     final cat = build({'a/b.png': null});
     await cat.debugPut(CatalogEntry(
@@ -99,22 +101,41 @@ void main() {
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(await cat.offlineCopyStatus('a/b.png'),
-        OfflineCopyStatus.remoteDeleted);
+    expect(await cat.checkForUpdate('a/b.png'),
+        CacheStatus.remoteDeleted);
   });
 
-  test('offlineCopyStatus: unknown when a hash is missing', () async {
-    final cat = build({'a/b.png': _data('a/b.png')}); // remote hash null
+  test('checkForUpdate: remoteIncomplete when the server holds no bytes',
+      () async {
+    // A missing contentHash used to fold into `unknown` alongside "could not
+    // reach the server", which conflated a definite server answer with the
+    // absence of one. uploadStatus states it directly: no bytes yet, because
+    // an upload is in flight or one failed.
+    final cat = build({
+      'a/b.png': FileData(
+        id: 'id-a_b.png',
+        directory: 'd',
+        path: 'a/b.png',
+        createdAt: DateTime.utc(2026, 1, 1),
+        updatedAt: DateTime.utc(2026, 1, 1),
+        metadata: const {},
+        version: 1,
+        mimeType: 'image/png',
+        sizeBytes: 3,
+        uploadStatus: UploadStatus.pending,
+        contentHash: null, // a symptom of pending, not an independent state
+      )
+    });
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
       localPath: '${tmp.path}/id-a_b.png',
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.unknown);
+    expect(await cat.checkForUpdate('a/b.png'), CacheStatus.remoteIncomplete);
   });
 
-  test('offlineCopyStatus: unknown when offline', () async {
+  test('checkForUpdate: unknown when offline', () async {
     final cat = buildThrowing(const StorageUnavailableException('offline'));
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
@@ -122,10 +143,10 @@ void main() {
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(await cat.offlineCopyStatus('a/b.png'), OfflineCopyStatus.unknown);
+    expect(await cat.checkForUpdate('a/b.png'), CacheStatus.unknown);
   });
 
-  test('offlineCopyStatus: rethrows non-offline API errors', () async {
+  test('checkForUpdate: rethrows non-offline API errors', () async {
     final cat = buildThrowing(const StorageInternalException('boom'));
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
@@ -133,7 +154,7 @@ void main() {
       pinnedAt: DateTime.utc(2026, 1, 1),
       status: CatalogStatus.ready,
     ));
-    expect(() => cat.offlineCopyStatus('a/b.png'),
+    expect(() => cat.checkForUpdate('a/b.png'),
         throwsA(isA<StorageInternalException>()));
   });
 

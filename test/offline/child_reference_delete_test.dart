@@ -75,7 +75,6 @@ void main() {
     final q = TransferQueue(store);
     await q.enqueue((seq) => TransferRecord(
           seq: seq,
-          kind: TransferKind.download,
           path: 'a/b.png',
           localPath: '${tmp.path}/out',
           mimeType: null,

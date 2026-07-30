@@ -5,7 +5,6 @@ import 'package:dio/dio.dart';
 
 import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
-import 'managed_transfer.dart';
 
 enum DownloadTaskStatus {
   queued,
@@ -41,6 +40,22 @@ abstract class DownloadTask {
   final Duration retryBaseDelay;
   final Dio _httpClient;
 
+  /// Sent as `If-Range` alongside a range request, so a server that has since
+  /// overwritten the object answers with the whole body (HTTP 200) instead of
+  /// a range that would be appended to a stale partial.
+  ///
+  /// Supplied only by cache downloads, which have a catalog row to store an
+  /// ETag in. A one-shot download leaves it null and relies on its partial
+  /// being deleted on any graceful failure.
+  final String? ifRangeEtag;
+
+  String? _observedEtag;
+
+  /// The ETag the server returned for the bytes now on disk, when it sent one.
+  /// Read by the cache after a successful download so the next resume can send
+  /// it back as `If-Range`.
+  String? get observedEtag => _observedEtag;
+
   final _stateController = StreamController<DownloadTaskState>.broadcast();
   final _taskCompleter = Completer<void>();
 
@@ -58,15 +73,25 @@ abstract class DownloadTask {
     required this.retryBaseDelay,
     required Dio httpClient,
     required DownloadTaskStatus initialStatus,
+    this.ifRangeEtag,
   })  : _httpClient = httpClient,
         _state = DownloadTaskState(status: initialStatus);
 
+  /// Starts a download immediately.
+  ///
+  /// [isResume] continues from a partial already at [saveTo] rather than
+  /// starting from zero. The caller is responsible for having established that
+  /// the partial is still valid — see the cache's `contentHash` guard. Without
+  /// it, a partial left by an abrupt process kill would never be picked up,
+  /// since only `resume()` could previously set it.
   factory DownloadTask.start({
     required ChildReference reference,
     required String saveTo,
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
+    bool isResume = false,
+    String? ifRangeEtag,
   }) {
     final client = httpClient ??
         Dio(BaseOptions(validateStatus: (status) => status != null));
@@ -77,9 +102,10 @@ abstract class DownloadTask {
       maxRetries: maxRetries,
       retryBaseDelay: retryBaseDelay,
       httpClient: client,
+      ifRangeEtag: ifRangeEtag,
     );
 
-    unawaited(task._run());
+    unawaited(task._run(isResume: isResume));
     return task;
   }
 
@@ -91,7 +117,13 @@ abstract class DownloadTask {
         isResume && await file.exists() ? await file.length() : 0;
 
     final headers = existingBytes > 0
-        ? <String, dynamic>{'Range': 'bytes=$existingBytes-'}
+        ? <String, dynamic>{
+            'Range': 'bytes=$existingBytes-',
+            // Belt to the contentHash guard's braces: if the object changed,
+            // the server answers 200 with the whole body and the 206/200 branch
+            // below truncates instead of appending.
+            if (ifRangeEtag != null) 'If-Range': ifRangeEtag,
+          }
         : <String, dynamic>{};
 
     final response = await _httpClient.get<ResponseBody>(
@@ -111,7 +143,6 @@ abstract class DownloadTask {
       if (record != null && existingBytes >= record.sizeBytes) {
         _setProgress(1.0);
         _setStatus(DownloadTaskStatus.complete);
-        await _settleBeforeComplete();
         _completeTask();
         return;
       }
@@ -127,6 +158,10 @@ abstract class DownloadTask {
           response.headers.value(Headers.contentLengthHeader) ?? '',
         ) ??
         -1;
+
+    // Captured for the next resume's If-Range. Recorded before any bytes are
+    // written so it always describes the body being received.
+    _observedEtag = response.headers.value('etag') ?? _observedEtag;
 
     final isPartial = code == 206;
 
@@ -171,9 +206,6 @@ abstract class DownloadTask {
 
     _setProgress(1.0);
     _setStatus(DownloadTaskStatus.complete);
-    // Settle the durable record before `whenDone` resolves, so a completed
-    // download is never still visible in `pendingTransfers()`.
-    await _settleBeforeComplete();
     _completeTask();
   }
 
@@ -193,9 +225,11 @@ abstract class DownloadTask {
   void resume();
 
   /// Aborts an in-flight attempt because `WincheStorage.close()` was called.
-  /// A managed download returns to `queued` and resumes from its durable record
-  /// next session; a one-shot download has no record to resume from, so it
-  /// settles with [StorageCancelledException].
+  ///
+  /// Downloads are never durable, so there is no record to resume from: the
+  /// task settles with [StorageCancelledException]. Any partial bytes stay on
+  /// disk, and a later `keepCached()` resumes from them once it has confirmed
+  /// the remote content is unchanged.
   void abortForClose();
 
   /// Cancels in-flight HTTP without touching status or completion. Shared by
@@ -203,24 +237,6 @@ abstract class DownloadTask {
   void _abortInFlight() {
     _cancelToken?.cancel('closed');
     _cancelToken = null;
-  }
-
-  /// Awaited just before a successful completion. Null for a one-shot download;
-  /// the controller sets it on a managed one. It lives on the base because
-  /// [_attempt] — shared with the one-shot path — is where completion happens.
-  Future<void> Function()? onBeforeComplete;
-
-  /// Runs [onBeforeComplete], swallowing its failure: the bytes are already on
-  /// disk and verified, so a bookkeeping error must not turn that into a
-  /// failed download.
-  Future<void> _settleBeforeComplete() async {
-    final hook = onBeforeComplete;
-    if (hook == null) return;
-    try {
-      await hook();
-    } catch (_) {
-      // best-effort; the drive loop reconciles the record either way
-    }
   }
 
   /// Cancels the download and deletes any partially written file.
@@ -299,6 +315,7 @@ class _DirectDownloadTask extends DownloadTask {
     required super.maxRetries,
     required super.retryBaseDelay,
     required super.httpClient,
+    super.ifRangeEtag,
   }) : super._(initialStatus: DownloadTaskStatus.running);
 
   Future<void> _run({bool isResume = false}) async {
@@ -352,83 +369,3 @@ class _DirectDownloadTask extends DownloadTask {
   }
 }
 
-/// Controller-driven download task. Starts [DownloadTaskStatus.queued] and does
-/// NOT auto-run. The controller drives attempts via [runOnce].
-class ManagedDownloadTask extends DownloadTask implements ManagedTransfer {
-  ManagedDownloadTask({
-    required super.reference,
-    required super.saveTo,
-    Dio? httpClient,
-  }) : super._(
-          maxRetries: 0,
-          retryBaseDelay: const Duration(seconds: 1),
-          httpClient: httpClient ??
-              Dio(BaseOptions(validateStatus: (status) => status != null)),
-          initialStatus: DownloadTaskStatus.queued,
-        );
-
-  /// Invoked by [resume] so the controller re-drives the same handle.
-  /// Set by the controller.
-  @override
-  void Function()? onResume;
-
-  // `onBeforeComplete` is inherited from [DownloadTask]; it satisfies the
-  // ManagedTransfer contract and is set by the controller.
-
-  @override
-  ManagedTransferState get transferState => switch (_state.status) {
-        DownloadTaskStatus.queued => ManagedTransferState.queued,
-        DownloadTaskStatus.running => ManagedTransferState.running,
-        DownloadTaskStatus.paused => ManagedTransferState.paused,
-        DownloadTaskStatus.complete => ManagedTransferState.complete,
-        DownloadTaskStatus.failed => ManagedTransferState.failed,
-        DownloadTaskStatus.cancelled => ManagedTransferState.cancelled,
-      };
-
-  @override
-  void abortForClose() {
-    if (_isTerminal(_state.status)) return;
-    _abortInFlight();
-    // Back to `queued`, not `paused`: the durable record is flipped to pending
-    // by the controller and this handle resumes on the next launch.
-    _setStatus(DownloadTaskStatus.queued);
-  }
-
-  /// Runs exactly one attempt (managed mode). On success the task completes
-  /// ([DownloadTaskStatus.complete], `whenDone` resolves). On failure it returns
-  /// to [DownloadTaskStatus.queued] and rethrows WITHOUT completing `whenDone`,
-  /// so the controller can retry the same handle or call [failPermanently].
-  @override
-  Future<void> runOnce({bool isResume = false}) async {
-    _setStatus(DownloadTaskStatus.running);
-    _cancelToken = CancelToken();
-    try {
-      await _attempt(isResume: isResume);
-    } catch (e) {
-      if (e is DioException && e.type == DioExceptionType.cancel) return;
-      _setStatus(DownloadTaskStatus.queued);
-      rethrow;
-    }
-  }
-
-  /// Terminal failure (managed mode): retries exhausted / non-retryable. Sets
-  /// [DownloadTaskStatus.failed] and errors `whenDone`.
-  @override
-  void failPermanently(Object error, [StackTrace? st]) {
-    _setStatus(DownloadTaskStatus.failed);
-    if (!_taskCompleter.isCompleted) {
-      _taskCompleter.completeError(error, st);
-    }
-    _closeStreams();
-  }
-
-  @override
-  void resume() {
-    if (_state.status != DownloadTaskStatus.paused) {
-      throw StateError(
-          'Cannot resume: task is ${_state.status} (expected paused)');
-    }
-    _setStatus(DownloadTaskStatus.queued);
-    onResume?.call();
-  }
-}

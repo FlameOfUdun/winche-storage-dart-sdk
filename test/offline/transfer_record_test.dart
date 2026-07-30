@@ -5,7 +5,6 @@ void main() {
   test('round-trips through toJson/fromJson', () {
     final rec = TransferRecord(
       seq: 7,
-      kind: TransferKind.upload,
       path: 'a/b.png',
       localPath: '/src/b.png',
       mimeType: 'image/png',
@@ -18,7 +17,6 @@ void main() {
     );
     final restored = TransferRecord.fromJson(rec.toJson());
     expect(restored.seq, 7);
-    expect(restored.kind, TransferKind.upload);
     expect(restored.path, 'a/b.png');
     expect(restored.localPath, '/src/b.png');
     expect(restored.mimeType, 'image/png');
@@ -31,7 +29,6 @@ void main() {
   test('copyWith updates status/attempt/lastError', () {
     final rec = TransferRecord(
       seq: 1,
-      kind: TransferKind.download,
       path: 'a/b',
       localPath: '/d/b',
       mimeType: null,
@@ -53,7 +50,6 @@ void main() {
   test('pinned round-trips through JSON and defaults to false', () {
     final rec = TransferRecord(
       seq: 1,
-      kind: TransferKind.upload,
       path: 'a/b.png',
       localPath: '/src',
       mimeType: 'image/png',

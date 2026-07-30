@@ -42,11 +42,11 @@ export 'src/offline/memory_storage_local_store.dart'
 export 'src/offline/sembast_storage_local_store.dart'
     show SembastStorageLocalStore;
 export 'src/offline/catalog_entry.dart' show CatalogEntry, CatalogStatus;
-export 'src/offline/transfer_record.dart'
-    show TransferRecord, TransferKind, TransferStatus;
+export 'src/offline/transfer_record.dart' show TransferRecord, TransferStatus;
 export 'src/offline/transfer_event.dart'
-    show TransferEvent, TransferEventType;
-export 'src/offline/offline_copy_status.dart' show OfflineCopyStatus;
+    show TransferEvent, TransferEventType, TransferKind;
+export 'src/offline/cache_status.dart' show CacheStatus;
+export 'src/offline/cached_file.dart' show CachedFile;
 
 /// True on the web, where Dart's numeric types collapse so `0` and `0.0` are
 /// identical. On web the durable store uses IndexedDB (no directory needed).
@@ -124,7 +124,21 @@ final class WincheStorage extends WincheStorageService {
   StorageLocalStore? _store;
   OfflineCatalog? _catalog;
   TransferController? _controller;
-  final LiveTaskRegistry _oneShots = LiveTaskRegistry();
+
+  /// Every transfer's lifecycle events, from both sources: the durable queue
+  /// (uploads) and the live registry (one-shot uploads, all downloads).
+  ///
+  /// Owned by the facade rather than the controller so it survives user
+  /// switches — a listener attached once keeps working across sign-outs, and
+  /// one-shot transfers are no longer invisible on it.
+  final _events = StreamController<TransferEvent>.broadcast();
+  StreamSubscription<TransferEvent>? _controllerEvents;
+
+  late final LiveTaskRegistry _oneShots = LiveTaskRegistry(onEvent: _emit);
+
+  void _emit(TransferEvent event) {
+    if (!_events.isClosed) _events.add(event);
+  }
 
   /// Handed to every reference this service creates. Lives for the lifetime of
   /// the service and is re-pointed as sessions come and go, which is what lets
@@ -161,6 +175,11 @@ final class WincheStorage extends WincheStorageService {
   /// suite only.
   @visibleForTesting
   Object? get debugSession => _api;
+
+  /// The bound file cache, or null when no store is configured. For tests that
+  /// need to seed cache rows without performing a real download.
+  @visibleForTesting
+  OfflineCatalog? get debugCatalog => _catalog;
 
   @override
   Future<void> onSessionChanged(WincheSession? session) async {
@@ -222,7 +241,7 @@ final class WincheStorage extends WincheStorageService {
   /// `retryPollInterval` backstop.
   @override
   Future<void> onTokenChanged() async {
-    await _controller?.resumeTransfers();
+    await _controller?.resumeUploads();
   }
 
   void _bind({
@@ -252,9 +271,15 @@ final class WincheStorage extends WincheStorageService {
             store: store,
             directoryResolver: resolveDirectory,
             multipartThreshold: _config.multipartThreshold,
-            controller: controller,
+            // So a cache fill is aborted with everything else on teardown, and
+            // shows up on transferEvents like any other transfer.
+            registry: _oneShots,
           );
     if (controller != null && catalog != null) controller.pinSink = catalog;
+
+    // Forward the queue's events onto the facade's stream, which outlives the
+    // session. Cancelled in _teardown before the controller closes.
+    _controllerEvents = controller?.events.listen(_emit);
 
     _api = api;
     _store = store;
@@ -296,6 +321,9 @@ final class WincheStorage extends WincheStorageService {
     _started = false;
     _binding.unbind();
 
+    await _controllerEvents?.cancel();
+    _controllerEvents = null;
+
     _oneShots.abortAll();
     await controller?.close();
     await store?.close();
@@ -304,6 +332,7 @@ final class WincheStorage extends WincheStorageService {
   @override
   Future<void> dispose() async {
     await _teardown();
+    if (!_events.isClosed) await _events.close();
     await super.dispose();
   }
 
@@ -336,41 +365,59 @@ final class WincheStorage extends WincheStorageService {
   ChildReference child(String path) =>
       ChildReference.bound(path: path, binding: _binding);
 
-  /// Re-drives every transfer halted by a pause — an expired token or an
+  /// Re-drives every upload halted by a pause — an expired token or an
   /// unreachable server.
   ///
   /// A token refresh already does this on its own, so call it only for things
   /// the SDK cannot see: the OS reporting the network is back, or the app
   /// returning to the foreground. Nothing is lost by not calling it — a paused
-  /// transfer keeps its place in the queue and its retry budget indefinitely,
-  /// and the `retryPollInterval` backstop re-drives it within one poll.
-  Future<void> resumeTransfers() => _requireController().resumeTransfers();
+  /// upload keeps its place in the queue and its retry budget indefinitely, and
+  /// the `retryPollInterval` backstop re-drives it within one poll.
+  ///
+  /// Uploads only: downloads are not persisted, so there is nothing to resume.
+  Future<void> resumeUploads() => _requireController().resumeUploads();
 
-  /// A snapshot of the durable transfer queue — every transfer that has not
-  /// completed yet (pending, running, or failed awaiting retry), optionally
-  /// filtered by [kind].
-  Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) =>
-      _requireController().pendingTransfers(kind: kind);
+  /// A snapshot of the durable upload queue — every upload that has not
+  /// completed yet (pending, running, or failed awaiting retry).
+  Future<List<TransferRecord>> pendingUploads() =>
+      _requireController().pendingUploads();
 
-  /// The live tracked upload handle for [path], or null when none is in flight.
-  UploadTask? uploadFor(String path) => _requireController().uploadFor(path);
+  /// The live upload handle for [path], or null when none is in flight.
+  ///
+  /// Survives a restart: a durable upload is rehydrated from its record, so a
+  /// UI can reattach to work started in a previous session.
+  UploadTask? uploadFor(String path) =>
+      _requireController().uploadFor(path) ?? _oneShots.uploadFor(path);
 
-  /// The live tracked download handle for [path], or null when none is in
-  /// flight.
-  DownloadTask? downloadFor(String path) =>
-      _requireController().downloadFor(path);
+  /// The live download handle for [path], or null when none is in flight.
+  ///
+  /// In-session only, unlike [uploadFor]: downloads are never persisted, so a
+  /// download that did not survive the process is not running and there is
+  /// nothing to reattach to.
+  DownloadTask? downloadFor(String path) {
+    _require();
+    return _oneShots.downloadFor(path);
+  }
 
-  /// Lifecycle events as the transfer queue drains.
-  Stream<TransferEvent> get transferEvents => _requireController().events;
+  /// Lifecycle events for every transfer — durable uploads as the queue drains,
+  /// and one-shot uploads and downloads as they run.
+  Stream<TransferEvent> get transferEvents {
+    _require();
+    return _events.stream;
+  }
 
-  /// Evicts every pinned offline file.
-  Future<void> clearOfflineCache() {
+  /// Deletes every cached file for the signed-in identity.
+  ///
+  /// The only bulk cache operation: caching is per file, so there is no
+  /// enumeration API and no automatic eviction. Everything on disk is there
+  /// because the application named that file.
+  Future<void> clearCache() {
     _require();
     final catalog = _catalog;
     if (catalog == null) {
       throw StateError(
         'No local store configured. Set WincheOptions.directoryResolver, or '
-        'WincheStorageConfig.inMemory, to enable the offline cache.',
+        'WincheStorageConfig.inMemory, to enable the file cache.',
       );
     }
     return catalog.clear();

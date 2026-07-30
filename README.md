@@ -1,26 +1,33 @@
 # winche_storage
 
-Dart SDK for the WincheStorage file management backend. Provides resumable, multipart-aware upload and download tasks behind a reference-based API, with an optional durable **offline cache** and **auto-resume** layer.
+Dart SDK for the WincheStorage file management backend. Provides resumable, multipart-aware upload and download tasks behind a reference-based API, with an optional **file cache** and a durable **upload outbox**.
 
 ## Features
 
 - Reference-based `ChildReference` API (`storage.child('a/b/c.jpg')`).
 - Resumable, multipart-aware uploads from a file path or raw bytes.
-- Resumable downloads with HTTP `Range` support.
+- Resumable downloads with HTTP `Range` support, guarded against server-side
+  overwrites so a resumed download can never splice old and new content.
 - Pause / resume / cancel on both upload and download tasks, with progress streams.
-- **Offline cache:** keep files available offline — `cache: true` on upload (no
-  download roundtrip) or `makeAvailableOffline()` after. Server reads
-  (`getSnapshot`/`listChildren`) and cache reads (`offlineSnapshot`/
-  `offlineChildren`) are separate; content-aware freshness via `offlineCopyStatus()`.
-- **Durable transfers:** `enqueue: true` queues an upload/download so it survives
-  an app restart and retries with backoff — start it while offline and just
-  `await` it. Reattach a progress UI after a restart with `uploadFor`/`downloadFor`.
-- Per-operation control: `enqueue` (durable) and `cache` (keep-offline) flags;
-  transfers expose a `queued` state and resolve only on the terminal outcome.
+- **File cache:** keep a file's *bytes* on the device — `cache: true` on upload
+  (no download roundtrip) or `keepCached()` after. Server listings are annotated
+  with what you already hold, so one read tells you both what exists and what is
+  available offline. Content-aware freshness via `checkForUpdate()`.
+- **Durable uploads:** `enqueue: true` queues an upload so it survives an app
+  restart and retries with backoff — start it while offline and just `await` it.
+  Reattach a progress UI after a restart with `uploadFor`.
+- Per-operation control: `enqueue` (durable) and `cache` (keep the bytes) flags;
+  uploads expose a `queued` state and resolve only on the terminal outcome.
+
 - Pure Dart — no Flutter dependency. Persistence via [`sembast`](https://pub.dev/packages/sembast)
   (file on native, IndexedDB on web), or fully in-memory.
 - Pluggable backend via the `WincheStorageApi` interface (`WincheStorageHttpApi` ships by default).
 - Typed exceptions (`WincheStorageException` and subclasses).
+
+> **Scope.** This package caches file *content*, not the storage index.
+> Directory listings and file metadata are always live reads and fail when the
+> server is unreachable. For offline-capable structured data, use
+> [`winche_database`](https://pub.dev/packages/winche_database).
 
 ## Installation
 
@@ -55,8 +62,8 @@ void main() {
       storageEndpoint: Uri.parse('https://your-api.example.com/files'),
 
       // The parent directory every Winche package creates its state under.
-      // Its presence (or inMemory, or web) enables the durable transfer queue
-      // and the offline cache — there are no separate enable flags.
+      // Its presence (or inMemory, or web) enables the durable upload outbox
+      // and the file cache — there are no separate enable flags.
       directoryResolver: () async {
         final dir = await getApplicationDocumentsDirectory(); // path_provider
         return '${dir.path}/winche';
@@ -81,11 +88,11 @@ WincheStorage.instance.config = const WincheStorageConfig(
   // Files larger than this are uploaded in parts. Defaults to 5 MiB.
   multipartThreshold: 5 * 1024 * 1024,
 
-  // Use an in-memory index (catalog + transfer queue) instead of sembast —
+  // Use an in-memory index (catalog + upload queue) instead of sembast —
   // files still go to disk. Handy for tests. Defaults to false.
   inMemory: false,
 
-  // Backoff tuning for the durable transfer queue's retries.
+  // Backoff tuning for the durable upload queue's retries.
   retryBaseDelay: Duration(seconds: 1),
   retryMaxDelay: Duration(seconds: 30),
   retryMaxAttempts: 5,
@@ -97,26 +104,26 @@ Setting `config` after storage has been used throws a `StateError` — the value
 are read when a session is built, so a later change would apply to some sessions
 and not others.
 
-> **Store presence enables the subsystems.** The durable transfer queue and
-> offline cache exist whenever there's somewhere to put a store: a
+> **Store presence enables the subsystems.** The durable upload outbox and the
+> file cache exist whenever there's somewhere to put a store: a
 > `directoryResolver` on the app (native), `inMemory: true`, or web (IndexedDB).
 > With none of those configured on native the SDK is fully stateless — basic
 > upload/download still work (`download` takes an explicit path), and
-> durable/offline operations throw `StateError` naming both knobs that would
+> durable/cache operations throw `StateError` naming both knobs that would
 > enable them.
 
 There is no `close()`. Core tears a session down on sign-out and disposes the
 service with the app, in dependency order — one-shot transfers, then the
-transfer queue, then the store — never waiting on the network. Durable
-transfers are left resumable; one-shot transfers fail with
+upload queue, then the store — never waiting on the network. Durable uploads
+are left resumable; one-shot transfers fail with
 `StorageCancelledException`.
 
 ## Multi-user
 
-Local state is single-tenant. The offline catalog, the cached bytes and the
-durable transfer queue carry no identity of their own, so one store shared
-between two users would mean the second reads the first's pinned files, and the
-first's queued uploads replay under the second's token.
+Local state is single-tenant. The cache catalog, the cached bytes and the
+durable upload queue carry no identity of their own, so one store shared between
+two users would mean the second reads the first's cached files, and the first's
+queued uploads replay under the second's token.
 
 Nothing in your code has to prevent that. Each identity gets its own directory,
 derived from the signed-in user:
@@ -124,7 +131,7 @@ derived from the signed-in user:
 ```
 <directoryResolver()>/winche/<storageKey>/storage/index.db   sembast: catalog + queue
 <directoryResolver()>/winche/<storageKey>/storage/cache/…    cached bytes
-<directoryResolver()>/winche/<storageKey>/storage/staging/…  pinned uploads in flight
+<directoryResolver()>/winche/<storageKey>/storage/staging/…  cached uploads in flight
 ```
 
 `storageKey` is `WincheIdentity.storageKey` — a SHA-256 digest of the user id,
@@ -182,13 +189,16 @@ root for the whole stack, so `on WincheException` catches it.
 
 ## How a transfer flows
 
-The two per-call flags (`cache`, `enqueue`) and the durable lifecycle at a glance:
+Uploads and downloads are deliberately asymmetric. An upload is the **only copy**
+of something — lose the queue and the work is gone. A download is a **cache
+fill**: the bytes stay authoritative on the server, so losing one costs bandwidth
+and never data. Only uploads are persisted.
 
 ```mermaid
 flowchart TD
-    Start(["uploadPath / uploadBytes / download"]) --> Cache{"cache: true?<br/>(uploads)"}
-    Cache -->|yes| Stage["stage source into the offline cache,<br/>upload from the staged copy"]
-    Cache -->|no| Enq{"enqueue: true?<br/>(uploadPath / download)"}
+    Up(["uploadPath / uploadBytes"]) --> Cache{"cache: true?"}
+    Cache -->|yes| Stage["stage source into the file cache,<br/>upload from the staged copy"]
+    Cache -->|no| Enq{"enqueue: true?<br/>(uploadPath only)"}
     Stage --> Enq
 
     Enq -->|no| Direct["one-shot task → running"]
@@ -197,18 +207,29 @@ flowchart TD
     DirOut -->|"no (e.g. offline)"| Failed(["failed"])
 
     Enq -->|yes| Queued["tracked handle: queued"]
-    Queued --> Attempt["controller drives one attempt → running"]
+    Queued --> Attempt["outbox drives one attempt → running"]
     Attempt --> Outcome{"outcome"}
-    Outcome -->|success| Done2(["complete · dropped from queue<br/>offline copy finalized if cache:true"])
+    Outcome -->|success| Done2(["complete · dropped from queue<br/>cached copy committed if cache:true"])
     Outcome -->|"transient / offline"| Backoff["back to queued · backoff"]
     Backoff --> Attempt
     Outcome -->|"retries exhausted / permanent"| Failed2(["failed"])
+
+    Dl(["download / keepCached"]) --> Once["one-shot task → running"]
+    Once --> DlOut{"success?"}
+    DlOut -->|yes| DlDone(["complete"])
+    DlOut -->|"transient"| DlRetry["in-session retry · backoff"]
+    DlRetry --> Once
+    DlOut -->|"offline / exhausted"| DlFailed(["failed — call again when back online"])
 ```
 
-A tracked (`enqueue: true`) handle survives an app restart: on construction the
-controller rehydrates the queue and re-drives each transfer from `queued`. Its
-`whenDone` resolves only at a terminal node (`complete` / `failed`), so you can
-start a transfer offline and just `await` it.
+A tracked (`enqueue: true`) upload survives an app restart: the outbox rehydrates
+the queue and re-drives each record from `queued`. Its `whenDone` resolves only
+at a terminal node (`complete` / `failed`), so you can start an upload offline
+and just `await` it.
+
+Downloads retry within the session but are not persisted. A partially downloaded
+file left by an abrupt exit is not lost, though: the next `keepCached()` resumes
+from those bytes after confirming the server's content has not changed.
 
 ## Usage
 
@@ -272,18 +293,19 @@ are uploaded in parts.
 
 Two optional flags make an upload robust:
 
-- **`enqueue: true`** — durable: the upload joins the transfer queue, is deduped
+- **`enqueue: true`** — durable: the upload joins the outbox, is deduped
   by path, survives an app restart, and retries until it succeeds (so it can be
   started while offline). File-backed only (`uploadPath`); requires a configured
   store. Without it, the upload is a one-shot.
-- **`cache: true`** — keep it available offline: the source is staged, uploaded
-  from that staged copy, then moved into the id-keyed offline cache on success —
-  no separate download. Best-effort (a caching failure leaves the upload
-  successful and records a stale pin). Requires a configured offline cache.
+- **`cache: true`** — keep the bytes on the device: the source is staged,
+  uploaded from that staged copy, then moved into the id-keyed file cache on
+  success — no separate download. Best-effort (a caching failure leaves the
+  upload successful and records a row a later `keepCached()` fills in). Requires
+  a configured cache.
 
 ```dart
-// Durable AND offline-kept — start it even while offline; await it; it
-// completes once the server is reachable.
+// Durable AND cached — start it even while offline; await it; it completes
+// once the server is reachable.
 final task = photoRef.uploadPath(
   '/local/path/photo.jpg',
   enqueue: true,
@@ -296,14 +318,17 @@ A flag whose subsystem isn't configured throws `StateError` (see
 [Setup](#setup)). `uploadBytes` accepts `cache` (it stages the bytes to disk
 first) but **not** `enqueue` — byte uploads aren't durable; write the bytes to a
 file and use `uploadPath(enqueue: true)` for that. The `cache` upload is the
-upload-time counterpart to [`makeAvailableOffline()`](#offline-cache): same
-result, reusing the bytes you already have instead of downloading them back.
+upload-time counterpart to [`keepCached()`](#file-cache): same result, reusing
+the bytes you already have instead of downloading them back.
+
+> Caching a file you are *currently uploading* with `keepCached()` fails with a
+> failed-precondition error — the server genuinely has no bytes yet. That is
+> what `cache: true` is for.
 
 ### Download
 
-`download` writes the file's bytes to an explicit path. For a managed,
-offline-cached copy that needs no path, use
-[`makeAvailableOffline`](#offline-cache) instead.
+`download` writes the file's bytes to an explicit path you choose. For a managed
+copy that needs no path, use [`keepCached()`](#file-cache) instead.
 
 ```dart
 final task = photoRef.download('/local/photos/photo.jpg');
@@ -315,10 +340,14 @@ task.stateStream.listen((DownloadTaskState state) {
 await task.whenDone;
 ```
 
-Pass `enqueue: true` to make the download durable — it joins the transfer queue
-and resumes after an app restart, retrying until it succeeds (requires a
-configured store; throws `StateError` otherwise). Without it the download is a
-one-shot.
+Downloads are one-shot with in-session retry — they are never persisted, since
+the bytes stay authoritative on the server. If you lose the handle while it is
+running, `storage.downloadFor(path)` returns it.
+
+> A one-shot download paused and resumed *within a session* is not guarded
+> against the server's content being overwritten in between. The window is short
+> and user-driven; `keepCached()`, which has a catalog row to compare against,
+> is guarded.
 
 ### Pause / resume / cancel
 
@@ -335,159 +364,167 @@ await task.cancel();
 task.cancel();
 ```
 
-### Offline cache
+### File cache
 
-Requires a configured store (see [Setup](#setup)). Pin a file to download it
-into a managed, id-keyed cache directory and track it so it stays available
-offline.
+Requires a configured store (see [Setup](#setup)). Caching keeps a file's
+**bytes** on the device. It is per file and always explicit — nothing is cached
+that you did not name, and nothing is ever evicted automatically.
 
 > If you're the one uploading the file, prefer `uploadPath(..., cache: true)`
 > (see [Upload](#upload)) — it populates the cache from the bytes you already
 > have, skipping the download this method would otherwise perform.
 
 ```dart
-// Download + pin for offline use. Completes when the file is on disk.
-await photoRef.makeAvailableOffline();
+// Download and keep the bytes. Returns the local copy; if it is already
+// cached, returns it without touching the network.
+final CachedFile copy = await photoRef.keepCached();
+print(copy.localPath);
 
-// On a directory path it pins every file directly under it (one level — the
-// server lists a single level, so nested sub-directories aren't included):
-await storage.child('userFiles/user-123').makeAvailableOffline();
+// The local copy, or null when this device doesn't have it. Never contacts
+// the server, and never throws for "not cached".
+final CachedFile? local = await photoRef.cachedFile();
 
-// What changed about the pinned copy? (content overwrite vs deleted vs current)
-switch (await photoRef.offlineCopyStatus()) {
-  case OfflineCopyStatus.contentChanged:
-    await photoRef.refreshOfflineCopy(); // bytes changed — re-download
-  case OfflineCopyStatus.remoteDeleted:
-    await photoRef.removeOfflineCopy();  // gone — drop the local copy
-  case OfflineCopyStatus.upToDate:
-  case OfflineCopyStatus.notPinned:
-  case OfflineCopyStatus.unknown:        // offline / no fingerprint — leave as-is
+// Has the server's copy changed since? This one DOES round-trip.
+switch (await photoRef.checkForUpdate()) {
+  case CacheStatus.contentChanged:
+    await photoRef.refreshCache();   // bytes changed — re-download
+  case CacheStatus.remoteDeleted:
+    await photoRef.clearCache();     // gone — drop the local copy
+  case CacheStatus.remoteIncomplete: // someone is uploading over it
+  case CacheStatus.upToDate:
+  case CacheStatus.unknown:          // offline — couldn't ask
     break;
 }
 
-// Drop the local copy and catalog entry.
-await photoRef.removeOfflineCopy();
+// Drop this file's bytes.
+await photoRef.clearCache();
 
-// Remove every pinned file.
-await storage.clearOfflineCache();
+// Drop every cached file for the signed-in identity.
+await storage.clearCache();
 ```
 
-Reads split cleanly into **server** and **cache** — each call has one source:
-
-- `getSnapshot()` / `listChildren()` are **server-only**: they return the
-  authoritative server record(s) and throw `StorageUnavailableException` when the
-  server is unreachable. They never consult the cache, so their `fromCache` is
-  always `false` and they don't carry `isCached` / `localPath`.
-- `offlineSnapshot()` / `offlineChildren()` are **cache-only**: they read the
-  local catalog without contacting the server (`fromCache == true`), so they keep
-  working offline. Both require a configured store. `offlineSnapshot()` returns a
-  missing snapshot when the file isn't pinned; `offlineChildren()` returns the
-  pinned files directly under the path (a partial view, possibly empty).
+`keepCached()` caches exactly one file. To cache a directory's contents, list it
+and loop — which is also the only way to bound the concurrency yourself:
 
 ```dart
-// Server-only: authoritative, throws when offline.
-final FileSnapshot snap = await photoRef.getSnapshot();
-if (snap.exists) print('server size: ${snap.data!.sizeBytes}');
-
-// Cache-only: the local copy, no network.
-final FileSnapshot offline = await photoRef.offlineSnapshot();
-if (offline.exists) {
-  print('available offline at: ${offline.data!.localPath}'); // <cacheDir>/<id>.jpg
+final listing = await dir.listChildren();
+for (final snap in listing.files) {
+  await snap.reference.keepCached();
 }
 ```
 
-Compose them yourself for a remote-first-with-fallback read:
+#### Reads are always live; listings tell you what's cached
+
+`getSnapshot()` and `listChildren()` are server reads. They throw
+`StorageUnavailableException` when the server is unreachable — there is no
+metadata cache to fall back to. What they *do* carry is this device's cache
+state, per file:
 
 ```dart
-Future<FileSnapshot> read(ChildReference ref) async {
-  try {
-    return await ref.getSnapshot();      // server first
-  } on StorageUnavailableException {
-    return await ref.offlineSnapshot();  // fall back to the cached copy
-  }
+final listing = await userRoot.listChildren();
+for (final snap in listing.files) {
+  print('${snap.reference.path} ${snap.isCached ? "✓ offline" : ""}');
 }
 ```
 
-The directory counterpart — annotate a live listing with offline state by
-cross-referencing the cache-only read:
+`isCached` and `localPath` live on the **snapshot**, not on `FileData` —
+`FileData` carries only what the server sent. The annotation is read from the
+local catalog in one bulk lookup, which makes it cheap enough for a listing and
+advisory: it renders a badge. For an authoritative answer, and a path guaranteed
+to open, use `cachedFile()`.
 
 ```dart
-final live = await userRoot.listChildren();     // full server listing (throws offline)
-final cached = await userRoot.offlineChildren(); // pinned-only, works offline
-final cachedPaths = {for (final f in cached.files) f.reference.path};
-for (final snap in live.files) {
-  final badge = cachedPaths.contains(snap.reference.path) ? '✓ offline' : '';
-  print('${snap.reference.path} $badge');
+final CachedFile? copy = await photoRef.cachedFile();
+if (copy != null) {
+  // copy.localPath exists and is the full file — verified against the disk.
+  print('available offline at ${copy.localPath}');
 }
 ```
-
-> On a **cache-only** snapshot, `data.localPath` is the absolute path to the local
-> copy and `data.isCached` is `true` when its content is downloaded. Server-only
-> reads don't carry these — use the `offline*` reads or `offlineCopyStatus()`.
 
 Cached files are stored at
-`<directoryResolver()>/winche_storage_<namespace>/cache/<fileId><.ext>` — keyed by the
-immutable file id (so they survive path/metadata changes), with an extension
-derived from the name or MIME type. Pins are explicit and never auto-evicted.
+`<directoryResolver()>/winche/<storageKey>/storage/cache/<fileId><.ext>` — keyed
+by the immutable file id (so they survive path and metadata changes), with an
+extension derived from the name or MIME type. See [Multi-user](#multi-user) for
+what `storageKey` is.
 
-### Auto-resume
+#### Resuming is guarded against overwrites
 
-Available when a store is configured (see [Setup](#setup)). Uploads and
-downloads started with `enqueue: true` are persisted to a durable queue, resumed
-when the SDK is constructed, and retried
-on failure with exponential backoff (configurable via the `retry*` fields on
-`WincheStorageConfig`).
+If a `keepCached()` is interrupted by the app exiting, the partial bytes stay on
+disk and the next call resumes from them — but only after confirming the
+server's `contentHash` still matches the one recorded when the partial was
+written. If the file was overwritten in between, the partial is discarded and
+the download restarts.
+
+This matters because the failure it prevents is silent: appending fresh bytes to
+a prefix from different content produces a file of exactly the right length.
+
+### Durable uploads
+
+Available when a store is configured (see [Setup](#setup)). Uploads started with
+`enqueue: true` are persisted to a durable outbox, resumed when the SDK binds a
+session, and retried on failure with exponential backoff (configurable via the
+`retry*` fields on `WincheStorageConfig`).
 
 ```dart
 // `enqueue: true` makes it durable — queued, resumed after a restart, retried.
-final task = photoRef.download('/local/photos/photo.jpg', enqueue: true);
+final task = photoRef.uploadPath('/local/photos/photo.jpg', enqueue: true);
 
 // The queue is re-driven on sign-in and on every token refresh. Nudge it
 // yourself only for what the SDK cannot see — the OS reporting the network is
 // back, or the app returning to the foreground:
-await storage.resumeTransfers();
+await storage.resumeUploads();
 
-// Resume a single path's transfer.
-await photoRef.resumeTransfer();
+// Resume a single path's upload.
+await photoRef.resumeUpload();
 
-// Observe lifecycle events as the queue drains.
+// A snapshot of what is still owed.
+final List<TransferRecord> pending = await storage.pendingUploads();
+
+// Observe lifecycle events for every transfer — durable uploads as the queue
+// drains, and one-shot uploads and downloads as they run.
 storage.transferEvents.listen((TransferEvent e) {
   // started | completed | failed | retrying | paused
   print('${e.type} ${e.kind} ${e.path}');
 });
 ```
 
+> `paused` is emitted for durable uploads only. It means the queue halted on an
+> expired token or an unreachable server. A download's user-driven `pause()` is
+> visible on that task's own `stateStream`.
+>
+> `TransferEvent.record` is always null for a download: nothing is persisted for
+> one, and a failed download loses no data.
+
 #### How a failed attempt is handled
 
-A durable transfer's response to failure depends on what failed. One uniform
+A durable upload's response to failure depends on what failed. One uniform
 "count an attempt, then give up" policy would let an expired token or a flat
 network destroy queued work in a couple of minutes.
 
 | Failure | Behaviour |
 | --- | --- |
 | `unauthenticated`, `unavailable`, and `WincheSessionExpired` | **Paused.** The record and the handle both survive, and **no attempt is counted** — a paused transfer can wait indefinitely without exhausting its budget. It keeps probing on the usual backoff, so a brief blip recovers in about a second. Emits `TransferEventType.paused`; the record's status becomes `TransferStatus.paused` with the reason in `lastError`. |
-| `internal`, `deadlineExceeded`, `unknown`, and any non-`WincheStorageException` | **Retried** with exponential backoff, up to `retryMaxAttempts`. Past the cap the handle fails; the record stays in the queue as `failed` so `pendingTransfers()` still surfaces it. |
+| `internal`, `deadlineExceeded`, `unknown`, and any non-`WincheStorageException` | **Retried** with exponential backoff, up to `retryMaxAttempts`. Past the cap the handle fails; the record stays in the queue as `failed` so `pendingUploads()` still surfaces it. |
 | `permissionDenied`, `notFound`, `invalidArgument`, `failedPrecondition` | **Terminal.** The record is dropped and the handle fails. The `failed` event carries the full `TransferRecord` in `record`, so the work is recoverable — a path and an error alone would lose the source `localPath`, `mimeType` and `metadata`. |
 
 A token refresh re-drives everything that paused, rather than waiting out the
 `retryPollInterval` backstop. That happens on its own: core announces the
-rotation, storage nudges the queue. Call `storage.resumeTransfers()` only for
+rotation, storage nudges the queue. Call `storage.resumeUploads()` only for
 what the SDK cannot see, such as the OS reporting that the network is back.
 
-Note that a paused transfer's `whenDone` does **not** settle while it is paused —
+Note that a paused upload's `whenDone` does **not** settle while it is paused —
 that is the point of the stable handle: you can start an upload while offline and
 simply `await` it.
 
-When a transfer's `whenDone` resolves, it has fully landed: the durable record is
-already gone from `pendingTransfers()`, the `completed` event has already been
+When an upload's `whenDone` resolves, it has fully landed: the durable record is
+already gone from `pendingUploads()`, the `completed` event has already been
 emitted, and a `cache: true` upload's offline copy is already committed. You can
 read any of them on the next line without waiting.
 
-A durable (`enqueue: true`) transfer is **tracked** and deduped by path: calling
-`uploadPath`/`download` again for the same path returns the existing handle
-rather than starting a duplicate. After a restart the original handle object is
-gone, so reattach a progress UI with `storage.uploadFor(path)` /
-`downloadFor(path)`. Per-byte progress stays on the handle's `stateStream`, which
+A durable (`enqueue: true`) upload is **tracked** and deduped by path: calling
+`uploadPath` again for the same path returns the existing handle rather than
+starting a duplicate. After a restart the original handle object is gone, so
+reattach a progress UI with `storage.uploadFor(path)`. Per-byte progress stays on the handle's `stateStream`, which
 also reports the `queued` state while it waits to (re)start.
 
 ### List a directory
@@ -502,16 +539,18 @@ for (final snapshot in dir.files) {
 }
 ```
 
-`listChildren()` is server-only — it throws `StorageUnavailableException` when
-offline. For the locally pinned files, use `offlineChildren()` (see
-[Offline cache](#offline-cache)).
+`listChildren()` is a server read — it throws `StorageUnavailableException` when
+offline, since listings are never cached. Each returned `FileSnapshot` carries
+`isCached` / `localPath` for this device, so one call tells you both what exists
+and what you already hold (see [File cache](#file-cache)).
 
 ### Get file metadata
 
 `getSnapshot()` always returns a `FileSnapshot`. Check `exists` to know whether the file
-is present; `data` is null when it isn't. It's server-only (throws when offline);
-for the cached copy use `offlineSnapshot()` — see the
-[Offline cache](#offline-cache) section.
+is present; `data` is null when it isn't. It's a server read (throws when
+offline) annotated with `isCached` / `localPath` for this device; for the bytes
+without any network call use `cachedFile()` — see the
+[File cache](#file-cache) section.
 
 ```dart
 final FileSnapshot snapshot = await photoRef.getSnapshot();
@@ -570,11 +609,12 @@ store additionally throw `StateError` when none is configured.
 | `WincheStorage.instance` | The storage attached to the default app, building it if needed. Use `instanceFor(app)` for a named app. |
 | `config` | `WincheStorageConfig`. Settable until storage is first used, `StateError` after. |
 | `child(path)` | Returns a `ChildReference`. Never throws: the reference resolves its api and store when used. |
-| `resumeTransfers()` | Re-drives every transfer halted by a pause (expired token, unreachable server). Automatic on sign-in and on a token refresh — call it only for what the SDK cannot see, such as the OS reporting the network is back. |
-| `pendingTransfers({kind})` | Snapshot of the durable queue (pending/running/paused/failed `TransferRecord`s), optionally filtered by `TransferKind`. |
-| `transferEvents` | `Stream<TransferEvent>` of queue lifecycle events. |
-| `uploadFor(path)` / `downloadFor(path)` | The live tracked transfer handle for `path` (or `null`), to reattach a progress UI after a restart. |
-| `clearOfflineCache()` | Evicts every pinned file. |
+| `resumeUploads()` | Re-drives every upload halted by a pause (expired token, unreachable server). Automatic on sign-in and on a token refresh — call it only for what the SDK cannot see, such as the OS reporting the network is back. |
+| `pendingUploads()` | Snapshot of the durable outbox (pending/running/paused/failed `TransferRecord`s). Uploads only — downloads are not persisted. |
+| `transferEvents` | `Stream<TransferEvent>` covering every transfer: durable uploads as the queue drains, and one-shot uploads and downloads as they run. |
+| `uploadFor(path)` | The live upload handle for `path` (or `null`). Survives a restart — a durable upload is rehydrated from its record. |
+| `downloadFor(path)` | The live download handle for `path` (or `null`). In-session only: a download that did not survive the process is not running. |
+| `clearCache()` | Deletes every cached file for the signed-in identity. |
 | `dispose()` | Releases the service and deregisters it from the app. Teardown otherwise happens on sign-out, driven by core. |
 
 ### `ChildReference`
@@ -585,23 +625,22 @@ store additionally throw `StateError` when none is configured.
 | `name` | The last path segment (e.g. `photo.jpg`). |
 | `parent` | The parent reference, or `null` at a single-segment path. |
 | `child(path)` | Returns a new `ChildReference` at `this.path/path`. |
-| `getSnapshot()` | Fetches metadata from the **server only**; throws `StorageUnavailableException` when offline. |
-| `listChildren({mimeType})` | Lists files under this path from the **server only**, returning a `DirectorySnapshot` (its `.files` holds a `FileSnapshot` each); throws when offline. |
-| `offlineSnapshot()` | The cached copy's metadata, read from the local catalog only (`fromCache: true`); missing snapshot when not pinned. Requires a store. |
-| `offlineChildren({mimeType})` | The locally pinned files directly under this path, read from the local catalog only (`fromCache: true`, partial, may be empty). Requires a store. |
-| `uploadPath(localPath, {mimeType, metadata, multipartThreshold, enqueue, cache})` | Starts an `UploadTask` from a local file. `enqueue: true` → durable/queued; `cache: true` → also kept offline (stage-first). Each requires its subsystem, else `StateError`. |
-| `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, cache})` | Starts an `UploadTask` from raw bytes. `cache: true` keeps it offline. Not durable — use `uploadPath(enqueue: true)` for that. |
-| `download(saveTo, {enqueue})` | Starts a `DownloadTask` to the explicit path `saveTo`. `enqueue: true` → durable/queued (else one-shot). |
-| `makeAvailableOffline()` | Pins + downloads the file for offline use; on a directory path, pins every file directly under it (one level). Requires a configured store. |
-| `refreshOfflineCopy()` | Re-downloads the current remote version into the cache. Requires a configured store. |
-| `offlineCopyStatus()` | `Future<OfflineCopyStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `notPinned` / `unknown` (offline or no fingerprint). Requires a configured store. |
-| `removeOfflineCopy()` | Removes the local copy + catalog entry. Requires a configured store. |
-| `resumeTransfer()` | Resumes this path's queued/paused durable transfer. Requires a configured store. |
-| `updateMetadata(metadata)` | Updates server-side metadata. Returns a `FileSnapshot`. If the file is pinned offline, its cached metadata is updated too (content fingerprint preserved). |
+| `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws `StorageUnavailableException` when offline. |
+| `listChildren({mimeType})` | Lists files under this path from the **server**, returning a `DirectorySnapshot` whose `.files` each carry `isCached` / `localPath`; throws when offline. |
+| `cachedFile()` | `Future<CachedFile?>` — the local copy, or `null` when this device has no usable bytes. Never contacts the server; verified against the disk, so a returned `localPath` always opens. Requires a store. |
+| `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws `StorageNotFoundException` when the server has no record, and `StorageFailedPreconditionException` when it has a record but no bytes. Requires a store. |
+| `refreshCache()` | Unconditionally re-downloads the current remote version. Requires a store. |
+| `checkForUpdate()` | `Future<CacheStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `remoteIncomplete` / `unknown` (offline). **Round-trips**, unlike the other cache methods. Requires a store. |
+| `clearCache()` | Drops this file's cached bytes and catalog row. Requires a store. |
+| `uploadPath(localPath, {mimeType, metadata, multipartThreshold, enqueue, cache})` | Starts an `UploadTask` from a local file. `enqueue: true` → durable/queued; `cache: true` → also cached locally (stage-first). Each requires its subsystem, else `StateError`. |
+| `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, cache})` | Starts an `UploadTask` from raw bytes. `cache: true` caches it. Not durable — use `uploadPath(enqueue: true)` for that. |
+| `download(saveTo)` | Starts a one-shot `DownloadTask` to the explicit path `saveTo`, with in-session retry. |
+| `resumeUpload()` | Resumes this path's queued/paused durable upload. Requires a store. |
+| `updateMetadata(metadata)` | Updates server-side metadata. Returns a `FileSnapshot`. If the file is cached, its cached metadata is updated too (content fingerprint preserved). |
 | `delete()` | Deletes the file. Returns `bool`. |
 
-Offline / durable-transfer methods throw `StateError` when no store is
-configured (no `directoryResolver`, no `inMemory`, on native).
+Cache and durable-upload methods throw `StateError` when no store is configured
+(no `directoryResolver`, no `inMemory`, on native).
 
 ### `UploadTask`
 
@@ -642,31 +681,32 @@ An immutable snapshot of a file's metadata at a point in time.
 | --- | --- | --- |
 | `exists` | `bool` | Whether the file is present. |
 | `data` | `FileData?` | The file record, or `null` when `exists` is false. |
-| `fromCache` | `bool` | True when the snapshot came from a cache-only read (`offlineSnapshot()`); always false for the server-only `getSnapshot()`. |
+| `isCached` | `bool` | True when this device holds the file's bytes. Advisory — read from the catalog row so a listing costs one bulk lookup. For an authoritative answer use `cachedFile()`. |
+| `localPath` | `String?` | Absolute path to the local bytes when `isCached`, else null. |
 | `reference` | `ChildReference` | The reference this snapshot belongs to (use `reference.path` for the full path). |
 | `name` | `String` | The last path segment. |
 | `timestamp` | `DateTime` | When the snapshot was taken. |
 
+`isCached` and `localPath` live on the snapshot, not on `FileData`: they describe
+*this device*, and `FileData` carries only what the server sent.
+
 `FileData` fields: `id`, `directory`, `path`, `mimeType`, `sizeBytes`,
-`uploadStatus`, `metadata`, `version`, `createdAt`, `updatedAt`, `contentHash`,
-plus two client-side offline fields:
+`uploadStatus`, `metadata`, `version`, `createdAt`, `updatedAt`, `contentHash`.
 
-`contentHash` — the server's content fingerprint (object ETag), used by `offlineCopyStatus()`; null when the backend hasn't recorded one.
+`uploadStatus` — `pending`, `complete` or `failed`. The server's own statement
+about whether the bytes exist; `keepCached()` refuses anything but `complete`.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `localPath` | `String?` | Absolute path to the local copy, when pinned/registered. |
-| `isCached` | `bool` | True when the content is fully downloaded locally and ready for offline use. |
+`contentHash` — the server's content fingerprint (object ETag), used by
+`checkForUpdate()` and by the resume guard; null until an upload completes.
 
 ### `DirectorySnapshot`
 
-An immutable snapshot of a directory listing, returned by `listChildren()`
-(server) or `offlineChildren()` (cache).
+An immutable snapshot of a directory listing, returned by `listChildren()`.
+Always the authoritative server listing — listings are never cached.
 
 | Member | Type | Description |
 | --- | --- | --- |
-| `files` | `List<FileSnapshot>` | One snapshot per child file (unmodifiable). |
-| `fromCache` | `bool` | True when the listing came from `offlineChildren()` (a cache-only, partial, pinned-only view); false for the server-only `listChildren()`. |
+| `files` | `List<FileSnapshot>` | One snapshot per child file (unmodifiable), each annotated with `isCached` / `localPath`. |
 | `reference` | `ChildReference` | The directory this snapshot lists. |
 | `name` | `String` | The directory's last path segment. |
 | `length` / `isEmpty` / `isNotEmpty` | — | Convenience over `files`. |
@@ -678,10 +718,11 @@ An immutable snapshot of a directory listing, returned by `listChildren()`
 | --- | --- |
 | `TransferEvent` | `{type, kind, path, error, record}` emitted on `transferEvents`. `record` is the `TransferRecord` on a `failed` event, so dropped work can be re-enqueued. |
 | `TransferEventType` | `started`, `completed`, `failed`, `retrying`, `paused`. |
-| `TransferKind` | `upload`, `download`. |
-| `TransferRecord` / `TransferStatus` | A persisted queue entry returned by `pendingTransfers` — `{seq, kind, path, status, attempt, lastError, …}`; status is `pending`, `running`, `paused`, or `failed`. A `paused` transfer is waiting on a token or the network and has spent no attempts. |
-| `CatalogEntry` / `CatalogStatus` | A pinned file record (`downloading`, `ready`, `stale`). |
-| `OfflineCopyStatus` | `notPinned`, `upToDate`, `contentChanged`, `remoteDeleted`, `unknown` — result of `offlineCopyStatus()`. |
+| `TransferKind` | `upload`, `download` — describes an *event*. Records carry no kind: the queue holds uploads only. |
+| `TransferRecord` / `TransferStatus` | A persisted outbox entry returned by `pendingUploads()` — `{seq, path, status, attempt, lastError, …}`; status is `pending`, `running`, `paused`, or `failed`. A `paused` upload is waiting on a token or the network and has spent no attempts. |
+| `CachedFile` | A file whose bytes are on this device: `{reference, data, localPath, cachedAt}`. Returned only when the content is complete, which is why `cachedFile()` is nullable rather than returning a snapshot to interrogate. |
+| `CatalogEntry` / `CatalogStatus` | A cache row (`downloading`, `ready`, `stale`). |
+| `CacheStatus` | `upToDate`, `contentChanged`, `remoteDeleted`, `remoteIncomplete`, `unknown` — result of `checkForUpdate()`. "Not cached" is absent by design: it is `cachedFile() == null`, answerable without a round-trip. |
 | `StorageLocalStore` | Persistence interface; `MemoryStorageLocalStore` and `SembastStorageLocalStore` ship by default. |
 
 ### `WincheStorageException`
@@ -710,8 +751,8 @@ Subclasses: `StorageNotFoundException`, `StoragePermissionDeniedException`,
 
 - [`dio`](https://pub.dev/packages/dio) — HTTP client used by `WincheStorageHttpApi`, `UploadTask`, and `DownloadTask`
 - [`mime`](https://pub.dev/packages/mime) — MIME type inference from file extension in `ChildReference.uploadPath`
-- [`path`](https://pub.dev/packages/path) — platform-correct path joining for the offline cache
-- [`sembast`](https://pub.dev/packages/sembast) / [`sembast_web`](https://pub.dev/packages/sembast_web) — pure-Dart durable store for the offline catalog and transfer queue (native file / web IndexedDB)
+- [`path`](https://pub.dev/packages/path) — platform-correct path joining for the file cache
+- [`sembast`](https://pub.dev/packages/sembast) / [`sembast_web`](https://pub.dev/packages/sembast_web) — pure-Dart durable store for the cache catalog and upload queue (native file / web IndexedDB)
 
 ## License
 

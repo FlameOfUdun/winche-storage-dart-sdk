@@ -120,21 +120,21 @@ void main() {
     await signIn();
     await signOut();
 
-    expect(storage.resumeTransfers, throwsA(isA<WincheUnboundException>()));
-    expect(storage.pendingTransfers, throwsA(isA<WincheUnboundException>()));
+    expect(storage.resumeUploads, throwsA(isA<WincheUnboundException>()));
+    expect(storage.pendingUploads, throwsA(isA<WincheUnboundException>()));
     expect(() => storage.uploadFor('a/b'),
         throwsA(isA<WincheUnboundException>()));
     expect(() => storage.downloadFor('a/b'),
         throwsA(isA<WincheUnboundException>()));
     expect(() => storage.transferEvents,
         throwsA(isA<WincheUnboundException>()));
-    expect(storage.clearOfflineCache, throwsA(isA<WincheUnboundException>()));
+    expect(storage.clearCache, throwsA(isA<WincheUnboundException>()));
   });
 
   test('the same entry points report unbound before the first sign-in', () {
     // Not a StateError: being signed out is recoverable, and the same facade
     // starts working the moment an identity arrives.
-    expect(storage.pendingTransfers, throwsA(isA<WincheUnboundException>()));
+    expect(storage.pendingUploads, throwsA(isA<WincheUnboundException>()));
   });
 
   group('child() is lazy', () {
@@ -237,14 +237,14 @@ void main() {
         .uploadPath(src.path, enqueue: true)
         .whenDone
         .ignore();
-    await _until(() async => (await storage.pendingTransfers()).isNotEmpty);
+    await _until(() async => (await storage.pendingUploads()).isNotEmpty);
 
     await signOut();
     await signIn();
 
     // Nothing is left marked `running`, which on a new process would mean
     // "someone else is driving this".
-    final records = await storage.pendingTransfers();
+    final records = await storage.pendingUploads();
     expect(records, hasLength(1));
     expect(records.single.status, isNot(TransferStatus.running));
     expect(records.single.path, 'a/b.txt');
@@ -258,7 +258,7 @@ void main() {
         .uploadPath(src.path, enqueue: true)
         .whenDone
         .ignore();
-    await _until(() async => (await storage.pendingTransfers()).isNotEmpty);
+    await _until(() async => (await storage.pendingUploads()).isNotEmpty);
 
     final errors = <Object>[];
     await runZonedGuarded(() async {

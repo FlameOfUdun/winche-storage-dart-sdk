@@ -67,7 +67,7 @@ void main() {
   }
 
   Future<TransferRecord?> only(TransferController c) async {
-    final all = await c.pendingTransfers();
+    final all = await c.pendingUploads();
     return all.isEmpty ? null : all.single;
   }
 
@@ -115,7 +115,7 @@ void main() {
     await ctrl.close();
   });
 
-  test('resumeTransfers re-drives once the token is refreshed', () async {
+  test('resumeUploads re-drives once the token is refreshed', () async {
     final api = _FailingApi(const StorageUnauthenticatedException('expired'));
     // A long base delay parks the probe, so the resume is what moves it.
     final ctrl = build(api, base: const Duration(seconds: 30));
@@ -124,7 +124,7 @@ void main() {
 
     final before = api.calls;
     api.error = const StorageUnavailableException('now merely offline');
-    await ctrl.resumeTransfers();
+    await ctrl.resumeUploads();
 
     await _until(() async => api.calls > before);
     await ctrl.close();
@@ -157,7 +157,7 @@ void main() {
     await expectLater(
         task.whenDone, throwsA(isA<StoragePermissionDeniedException>()));
 
-    expect(await ctrl.pendingTransfers(), isEmpty,
+    expect(await ctrl.pendingUploads(), isEmpty,
         reason: 'a terminal failure drops the record');
 
     final failed = events.firstWhere((e) => e.type == TransferEventType.failed);

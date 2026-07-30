@@ -70,7 +70,6 @@ void main() {
       store: store,
       directoryResolver: () async => tmp.path,
       multipartThreshold: 5 * 1024 * 1024,
-      controller: ctrl,
     );
     ctrl.pinSink = catalog;
 

@@ -31,8 +31,8 @@ void main() {
     await app.settled;
 
     expect(storage.child('a/b').path, 'a/b');
-    expect(storage.resumeTransfers, throwsStateError);
-    expect(storage.pendingTransfers, throwsStateError);
+    expect(storage.resumeUploads, throwsStateError);
+    expect(storage.pendingUploads, throwsStateError);
   });
 
   test('inMemory needs no directory and wires the queue', () async {
@@ -48,8 +48,8 @@ void main() {
     auth.announce(WincheIdentity('user-1'));
     await app.settled;
 
-    await storage.resumeTransfers();
-    expect(await storage.pendingTransfers(), isEmpty);
+    await storage.resumeUploads();
+    expect(await storage.pendingUploads(), isEmpty);
     expect(storage.transferEvents, isA<Stream<TransferEvent>>());
   });
 

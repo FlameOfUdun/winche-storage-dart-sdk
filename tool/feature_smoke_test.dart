@@ -115,10 +115,10 @@ Future<void> main(List<String> args) async {
       }
     })());
     try {
-      await storage.pendingTransfers();
-      check('pendingTransfers reports unbound', false, 'no throw');
+      await storage.pendingUploads();
+      check('pendingUploads reports unbound', false, 'no throw');
     } on WincheUnboundException {
-      check('pendingTransfers reports unbound', true);
+      check('pendingUploads reports unbound', true);
     }
 
     // A reference built before anyone signs in must start working after.
@@ -150,17 +150,19 @@ Future<void> main(List<String> args) async {
         out.readAsBytesSync().length == bytes.length);
 
     print('\n[ Offline cache ]');
-    await earlyRef.makeAvailableOffline();
-    final offline = await earlyRef.offlineSnapshot();
-    check('offlineSnapshot sees the pinned copy', offline.exists);
-    check('offlineSnapshot is served from cache', offline.fromCache);
+    final cached = await earlyRef.keepCached();
+    check('keepCached returns a usable copy', File(cached.localPath).existsSync());
+    check('cachedFile sees it without a round-trip',
+        (await earlyRef.cachedFile()) != null);
+    check('checkForUpdate says the copy is current',
+        (await earlyRef.checkForUpdate()) == CacheStatus.upToDate);
 
     print('\n[ Durable transfer queue ]');
     final queued = storage.child('userFiles/alice/queued_$runId.txt');
     final src = File('${dir.path}/src_$runId.txt')..writeAsBytesSync([1, 2, 3]);
     await queued.uploadPath(src.path, enqueue: true).whenDone;
     check('an enqueued upload completes', true);
-    check('the queue drains to empty', (await storage.pendingTransfers()).isEmpty);
+    check('the queue drains to empty', (await storage.pendingUploads()).isEmpty);
 
     print('\n[ Metadata ]');
     await earlyRef.updateMetadata({'label': 'smoke'});
@@ -185,8 +187,8 @@ Future<void> main(List<String> args) async {
     final asBob = await storage.child('userFiles/bob').listChildren();
     check("bob's listing does not contain alice's file",
         !asBob.files.any((f) => f.reference.path.contains(runId)));
-    check("bob's offline cache is empty of alice's pin",
-        !(await storage.child(earlyRef.path).offlineSnapshot()).exists);
+    check("bob's cache is empty of alice's file",
+        (await storage.child(earlyRef.path).cachedFile()) == null);
     await expectDenied(
       "bob cannot read alice's file",
       () => storage.child(earlyRef.path).getSnapshot(),
@@ -196,8 +198,8 @@ Future<void> main(List<String> args) async {
     await signIn('alice');
     check("alice's file is still on the server",
         (await earlyRef.getSnapshot()).exists);
-    check("alice's offline pin survived the round trip",
-        (await earlyRef.offlineSnapshot()).exists);
+    check("alice's cached file survived the round trip",
+        (await earlyRef.cachedFile()) != null);
 
     print('\n[ On-disk layout ]');
     final identities = Directory('${dir.path}/winche').listSync().whereType<Directory>();
@@ -224,7 +226,7 @@ Future<void> main(List<String> args) async {
     await signOut();
     check('storage is unbound again', storage.debugSession == null);
     try {
-      await storage.pendingTransfers();
+      await storage.pendingUploads();
       check('operations report unbound after sign-out', false, 'no throw');
     } on WincheUnboundException {
       check('operations report unbound after sign-out', true);

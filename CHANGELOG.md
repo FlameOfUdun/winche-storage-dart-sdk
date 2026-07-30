@@ -12,11 +12,113 @@ launch under 5.0 every user starts from an empty cache and **any queued upload
 that had not yet reached the server is lost** — silently, with nothing in the UI
 to notice it. That is worse here than in a cache-only package: a queued upload
 exists nowhere else. Drain the queue before upgrading if that matters — check
-`pendingTransfers()` and wait for it to empty while 4.x is still installed.
+`pendingUploads()` and wait for it to empty while 4.x is still installed.
 
 ### Requires `winche_core` ^0.2.0
 
 Also raises the Dart SDK floor from `^3.0.0` to `^3.10.0` to match core.
+
+### Breaking: the offline layer is now a file cache
+
+The package cached file *content* but presented it as though it cached the
+storage *index*: `getSnapshot`/`listChildren` (server) sat beside
+`offlineSnapshot`/`offlineChildren` (cache), same return types, distinguished by
+a `fromCache` boolean -- implying the same question answered from two places. It
+wasn't. The catalog only ever held files someone explicitly cached, so the
+"cache read" was a different question wearing matching clothes.
+
+The scope is now explicit: **this package caches bytes, not the index.** Listings
+and metadata are always live. For offline-capable structured data, use
+`winche_database`.
+
+| removed | replacement |
+| --- | --- |
+| `offlineSnapshot()` | `cachedFile()` -> `CachedFile?` |
+| `offlineChildren()` | none -- listings are annotated instead |
+| `makeAvailableOffline()` | `keepCached()` -> `CachedFile` |
+| `refreshOfflineCopy()` | `refreshCache()` |
+| `removeOfflineCopy()` | `clearCache()` |
+| `offlineCopyStatus()` | `checkForUpdate()` |
+| `OfflineCopyStatus` | `CacheStatus` |
+| `WincheStorage.clearOfflineCache()` | `WincheStorage.clearCache()` |
+| `pendingTransfers({kind})` | `pendingUploads()` |
+| `resumeTransfers()` | `resumeUploads()` |
+| `ChildReference.resumeTransfer()` | `resumeUpload()` |
+| `FileSnapshot.fromCache` / `DirectorySnapshot.fromCache` | removed |
+| `FileData.isCached` / `FileData.localPath` | moved to `FileSnapshot` |
+
+- **Listings carry cache state.** Every `FileSnapshot` from `listChildren()` and
+  `getSnapshot()` now has `isCached` and `localPath`. This replaces the
+  documented recipe of calling both `listChildren()` and `offlineChildren()` and
+  hand-building a `Set` of paths to cross-reference.
+
+- **`cachedFile()` returns null, not a "missing" snapshot.** "I don't have these
+  bytes" and "this file doesn't exist" used to look identical. A returned
+  `CachedFile` is verified against the disk, so its `localPath` always opens.
+
+- **`keepCached()` is file-only and idempotent.** It no longer caches a whole
+  directory when the path has no file record -- that made one call fetch either
+  one file or hundreds depending on a server round-trip the caller couldn't see,
+  and it was the cache layer's only use of the storage index. It also returns the
+  existing copy instead of silently re-downloading; use `refreshCache()` to force.
+
+- **`FileData` is a pure wire model.** Everything on it came from the server.
+
+### Breaking: downloads are no longer durable
+
+`download(saveTo, enqueue: true)` is gone; `enqueue` leaves `download()`
+entirely. An upload is the only copy of something -- lose the queue and the work
+is gone. A download is a cache fill whose bytes stay authoritative on the server,
+so losing one costs bandwidth and never data. The durable queue is now an upload
+outbox.
+
+Range resume is **not** lost: the resume offset comes from the file on disk, not
+from the record, so `keepCached()` picks up a partial left by an app exit.
+In-session retry for downloads is unchanged.
+
+- `transferEvents` no longer reports durable download progress -- **because
+  downloads are no longer durable.** The replacement is `downloadFor(path)` plus
+  the task's `stateStream`, not a renamed API.
+- `transferEvents` now covers *more* than before: one-shot transfers used to emit
+  nothing at all, since only the queue emitted. Every transfer is now visible.
+- `downloadFor(path)` is in-session only. `uploadFor(path)` still survives a
+  restart.
+- `TransferRecord.kind` is gone (records are all uploads). `TransferKind`
+  remains, describing events.
+- Download rows written by an earlier version are purged on first launch. Left in
+  place they would deserialize under the upload-only record shape into an upload
+  whose source is the *download destination* -- uploading a partially fetched
+  file over the server's copy.
+
+### Fixed
+
+- **A cache fill interrupted by process death could never complete.** The
+  `downloading` -> `ready` transition lived in an awaiting stack frame, and
+  download records carried no `pinned` flag, so after a restart the bytes landed
+  but the row stayed `downloading` forever -- the file occupying disk, invisible,
+  and re-downloaded on every attempt. Removing durable downloads eliminates the
+  cross-process gap, and `cachedFile()` now verifies bytes rather than trusting
+  the row, so any row already stuck self-corrects.
+
+- **A resumed download could silently corrupt the file.** Bytes were appended to
+  whatever partial was on disk with no check that the server's content was
+  unchanged, producing an old-prefix/new-suffix splice that passes a length
+  check. Now guarded by comparing `contentHash` before resuming, with `If-Range`
+  as a second layer. The guard is exact rather than best-effort: a download only
+  starts when `uploadStatus == complete`, which implies a `contentHash`.
+
+- **`keepCached()` reported server conditions as `StateError`.** A file not being
+  on the server is an ordinary runtime condition, not a bug to fix. It is now
+  `StorageNotFoundException`, and a record whose bytes have not been uploaded yet
+  reports `StorageFailedPreconditionException` -- distinguishing "still
+  uploading, try later" from "the upload failed, it must be re-uploaded" --
+  instead of falling through to an obscure signed-URL error.
+
+- `CacheStatus.unknown` meant two unrelated things: "the server is unreachable"
+  and "there is no fingerprint to compare". The second is now `remoteIncomplete`,
+  which is what the server actually reports via `uploadStatus`. `notPinned`
+  leaves the enum: it is `cachedFile() == null`, answerable locally without a
+  round-trip.
 
 ### Changed
 
@@ -54,11 +156,11 @@ Also raises the Dart SDK floor from `^3.0.0` to `^3.10.0` to match core.
   teardown before dispatching the next session, so the outgoing identity's store
   is always fully closed before the incoming one opens.
 
-- **Breaking: `resumeUploads()` and `resumeDownloads()` are deleted.**
-  `resumeTransfers()` survives as the single manual nudge, and its purpose has
-  changed: sign-in and token rotation now re-drive the queue automatically, so
-  it is only for what the SDK cannot observe — the OS reporting the network is
-  back, or the app returning to the foreground.
+- **Breaking: `resumeDownloads()` is deleted**, along with durable downloads
+  themselves (see above). `resumeUploads()` is the single manual nudge, and its
+  purpose has changed: sign-in and token rotation now re-drive the queue
+  automatically, so it is only for what the SDK cannot observe — the OS
+  reporting the network is back, or the app returning to the foreground.
 
 - **Breaking: `WincheStorage.withStore(api, store)` is replaced by
   `debugBindStore(api, store)`**, a `@visibleForTesting` method on the instance.
@@ -123,7 +225,7 @@ queue that survives an expired token. Ports the fixes from `winche_database`
   cached, like `directoryResolver` — it pins the identity for the lifetime of the
   instance. Validated against `[A-Za-z0-9._-]+` rather than sanitised: rewriting a
   user id would collapse two identities onto one store.
-* **`WincheStorage.resumeTransfers()`** — re-drives every transfer halted by a
+* **`WincheStorage.resumeUploads()`** — re-drives every upload halted by a
   pause. Call it after refreshing an auth token instead of waiting out the
   `retryPollInterval` backstop. The `winche_database` `reconnect()` analogue.
 * `WincheStorage.isClosed`, `TransferStatus.paused`, `TransferEventType.paused`,
@@ -161,7 +263,7 @@ queue that survives an expired token. Ports the fixes from `winche_database`
   that a paused transfer probes indefinitely).
 * **A completed transfer is no longer briefly still in the queue.** The durable
   record was dropped just *after* the handle completed, so `await task.whenDone`
-  followed by `pendingTransfers()` could still see the finished transfer, and the
+  followed by `pendingUploads()` could still see the finished transfer, and the
   `completed` event could arrive after it. Both now happen in an awaited
   `onBeforeComplete` hook that runs before the handle completes — the same
   contract `cache: true` uploads already had for their pin.
