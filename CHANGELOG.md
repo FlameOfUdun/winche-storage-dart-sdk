@@ -1,5 +1,97 @@
 # CHANGELOG
 
+## 5.0.0
+
+Built on `winche_core`. Storage is now bound to whichever identity is signed
+in, rather than being handed a token, a namespace and a directory by the app.
+
+**Breaking: this release discards every existing local store.** The on-disk
+layout moved from `<dir>/winche_storage_<namespace>/` to
+`<root>/winche/<storageKey>/storage/`, and no migration is performed. On first
+launch under 5.0 every user starts from an empty cache and **any queued upload
+that had not yet reached the server is lost** — silently, with nothing in the UI
+to notice it. That is worse here than in a cache-only package: a queued upload
+exists nowhere else. Drain the queue before upgrading if that matters — check
+`pendingTransfers()` and wait for it to empty while 4.x is still installed.
+
+### Requires `winche_core` ^0.2.0
+
+Also raises the Dart SDK floor from `^3.0.0` to `^3.10.0` to match core.
+
+### Changed
+
+- **Breaking: `WincheStorage` is a `WincheStorageService`.** Construct the app
+  instead, and reach storage through `WincheStorage.instance` (or
+  `instanceFor(app)`). `winche_core` builds a session for whichever identity is
+  signed in and disposes it on sign-out.
+
+- **Breaking: four fields leave `WincheStorageConfig`.** Each was a way to get
+  it wrong; all four now come from core, where they cannot disagree with the
+  rest of the stack:
+
+  | 4.x | 5.0 |
+  |---|---|
+  | `uri` | `WincheOptions.storageEndpoint` |
+  | `tokenProvider` | `session.token()` |
+  | `namespaceResolver` | `identity.storageKey` |
+  | `directoryResolver` | `WincheOptions.directoryResolver` |
+
+  What remains is what storage tunes for itself: `multipartThreshold`,
+  `inMemory`, and the four `retry*` knobs. It is set on the instance
+  (`WincheStorage.instance.config = ...`) and throws a `StateError` once storage
+  has been used.
+
+  Stateless mode survives unchanged: no `directoryResolver` on the app,
+  `inMemory` off, native. Durable and offline operations still throw
+  `StateError`, now naming both knobs that would enable them.
+
+- **Breaking: `close()` is deleted.** Teardown is core's job — a sign-out tears
+  the session down, and `dispose()` releases the service. The order and the
+  guarantees are unchanged (one-shot transfers, then the queue, then the store,
+  never waiting on the network). `isClosed` is deleted with it.
+
+  A user switch no longer needs sequencing by the app. Core awaits storage's
+  teardown before dispatching the next session, so the outgoing identity's store
+  is always fully closed before the incoming one opens.
+
+- **Breaking: `resumeUploads()` and `resumeDownloads()` are deleted.**
+  `resumeTransfers()` survives as the single manual nudge, and its purpose has
+  changed: sign-in and token rotation now re-drive the queue automatically, so
+  it is only for what the SDK cannot observe — the OS reporting the network is
+  back, or the app returning to the foreground.
+
+- **Breaking: `WincheStorage.withStore(api, store)` is replaced by
+  `debugBindStore(api, store)`**, a `@visibleForTesting` method on the instance.
+
+- **Breaking: `WincheStorageException` extends `WincheException`**, core's root
+  for the whole stack. `status`, `message`, `details` and `statusCode` are
+  unchanged; only the supertype is new. `on WincheStorageException` still asks
+  the narrow question, and `on WincheException` now catches anything from any
+  Winche package.
+
+- **Breaking: `child()` no longer throws while unbound.** It returns a reference
+  that resolves its api and store when *used*, so building one is always safe —
+  including in a widget field or a `build` method, where a throw tears down the
+  tree instead of reaching an error branch. The operation you attempt is what
+  rejects with `WincheUnboundException`.
+
+  A reference is therefore always about whoever is signed in at the moment you
+  use it. One built before sign-in starts working when an identity arrives; one
+  built under a previous user reports unbound after they sign out, instead of
+  quietly reading a torn-down store.
+
+- **`WincheSessionExpired` now pauses a transfer instead of retrying it.** It
+  previously fell into the "not a `WincheStorageException`" default and counted
+  an attempt. A transfer that straddles a user switch is about to be aborted by
+  teardown anyway, so spending retry budget on a session that no longer exists
+  only loses work.
+
+### Removed
+
+- `validateNamespace` and the namespace concept. Core validates the identity,
+  and `storageKey` is a digest, so the check became unreachable by construction
+  — and a second implementation of a rule core owns is one more place to update.
+
 ## 4.0.1
 
 Packaging only — the library code is byte-for-byte identical to 4.0.0.
