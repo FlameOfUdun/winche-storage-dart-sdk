@@ -124,7 +124,6 @@ final class WincheStorage extends WincheStorageService {
   StorageLocalStore? _store;
   OfflineCatalog? _catalog;
   TransferController? _controller;
-  Future<String> Function()? _resolveDirectory;
   final LiveTaskRegistry _oneShots = LiveTaskRegistry();
 
   /// Handed to every reference this service creates. Lives for the lifetime of
@@ -261,7 +260,6 @@ final class WincheStorage extends WincheStorageService {
     _store = store;
     _catalog = catalog;
     _controller = controller;
-    _resolveDirectory = resolveDirectory;
     _binding.bind(
       api: api,
       catalog: catalog,
@@ -295,7 +293,6 @@ final class WincheStorage extends WincheStorageService {
     _store = null;
     _catalog = null;
     _controller = null;
-    _resolveDirectory = null;
     _started = false;
     _binding.unbind();
 
