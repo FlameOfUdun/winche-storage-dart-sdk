@@ -256,10 +256,10 @@ class OfflineCatalog implements UploadPinSink {
         : CacheStatus.contentChanged;
   }
 
-  /// Updates a cached file's metadata after a successful server write,
-  /// so offline reads ([offlineSnapshot]/[offlineChildren]) stay current. Only
+  /// Updates a cached file's metadata after a successful server write, so a
+  /// later [cachedFile] or [cachedFilesIn] reports the current metadata. Only
   /// the metadata is touched — the content fingerprint (and every byte-identity
-  /// field) is preserved, so [offlineCopyStatus] still correctly flags stale
+  /// field) is preserved, so [checkForUpdate] still correctly flags stale
   /// cached *bytes* even if the server content changed too. No-op when not cached.
   Future<void> syncMetadata(String path, Map<String, dynamic> metadata) async {
     final entry = await entryFor(path);

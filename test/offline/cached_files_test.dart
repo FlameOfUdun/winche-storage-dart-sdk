@@ -201,4 +201,38 @@ void main() {
     expect(await dir.cachedFiles(), isEmpty);
     expect(File('${tmp.path}/a.png').existsSync(), isFalse);
   });
+
+  test('does not confuse a directory with a longer one sharing its name',
+      () async {
+    // The doc names this case by example: `u1` must not pick up `u10`'s files.
+    // Exact parent matching gives it; a startsWith would not.
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u10/b.png', id: 'b');
+
+    expect((await ref.cachedFiles()).map((f) => f.path), ['u1/a.png']);
+  });
+
+  test('finds nothing for a reference built with a trailing slash', () async {
+    // Nothing normalizes the path a reference carries, so `u1/` is a directory
+    // no row has as its parent. Documented rather than smoothed over — this
+    // pins that the documented answer is the actual one.
+    final (cat, ref) = fixture(path: 'u1/');
+    await seed(cat, 'u1/a.png', id: 'a');
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('a reference from cachedFile can drop its own copy too', () async {
+    // The same guarantee as the cachedFiles() case, through the other producer.
+    // Both build their reference in _verifiedFile, so this is structurally
+    // covered — asserted rather than inferred, since the CHANGELOG claims it.
+    final (cat, dir) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    final file = await dir.child('a.png').cachedFile();
+
+    await file!.reference.clearCache();
+
+    expect(await dir.cachedFiles(), isEmpty);
+  });
 }

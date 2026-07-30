@@ -23,18 +23,31 @@ for (final f in await dir.cachedFiles()) {
 }
 ```
 
-### Fixed: cache operations on `CachedFile.reference`
+### Fixed: cache operations on a `CachedFile` read from the cache
 
-The reference carried by a `CachedFile` was built without the catalog, so
-`clearCache()`, `refreshCache()`, `keepCached()`, `cachedFile()` and
-`checkForUpdate()` all threw `StateError` on an object obtained *from the
-cache* — and `delete()` through one deleted the file on the server, then
-silently skipped its local cleanup, leaving the bytes and the catalog row
-behind as an orphan that still reported as cached.
+The reference carried by a `CachedFile` that was *read* from the cache —
+`cachedFile()`, `cachedFiles()`, or `keepCached()` when the bytes were already
+complete — was built without the catalog. So `clearCache()`, `refreshCache()`,
+`keepCached()`, `cachedFile()` and `checkForUpdate()` all threw `StateError` on
+an object obtained from the cache, and `delete()` through one deleted the file
+on the server and then silently skipped its local cleanup, leaving the bytes
+and the catalog row behind as an orphan that still reported as cached. A
+`CachedFile` returned by a download carries the reference you called it on and
+was never affected.
 
-It now carries the catalog. It still carries no upload queue, so
-`resumeUpload()` throws on it and `delete()` will not cancel a queued upload
-for that path — use `storage.child(path)` when either matters.
+It now carries the catalog, and the live-task registry with it: a transfer
+started through such a reference is aborted on sign-out, appears on
+`transferEvents`, and is findable via `downloadFor` / `uploadFor`.
+`uploadPath(..., cache: true)` through one now works too, where it previously
+threw `StateError`.
+
+It still carries no upload queue, so `resumeUpload()` throws on it and
+`delete()` will not cancel a queued upload for that path — use
+`storage.child(path)` when either matters.
+
+**Behaviour change:** `delete()` through a cache-read reference now evicts the
+local copy, where before it left the bytes behind. If you were relying on that,
+copy the bytes out before deleting — every route to `delete()` now cleans up.
 
 ## 5.0.0
 

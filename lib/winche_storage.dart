@@ -407,9 +407,11 @@ final class WincheStorage extends WincheStorageService {
 
   /// Deletes every cached file for the signed-in identity.
   ///
-  /// The only bulk cache operation: caching is per file, so there is no
-  /// enumeration API and no automatic eviction. Everything on disk is there
-  /// because the application named that file.
+  /// The only bulk *mutation*: caching is per file and there is no automatic
+  /// eviction, so nothing else removes bytes wholesale. To see what is cached
+  /// under a directory rather than remove it, use
+  /// [ChildReference.cachedFiles]. Everything on disk is there because the
+  /// application named that file.
   Future<void> clearCache() {
     _require();
     final catalog = _catalog;
