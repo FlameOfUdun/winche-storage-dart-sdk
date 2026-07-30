@@ -108,7 +108,7 @@ void main() {
     // Read on the very next turn — no polling. The controller's bookkeeping runs
     // in `onBeforeComplete`, before the handle completes, so awaiting a transfer
     // and then reading the queue can never show the finished work.
-    expect(await ctrl.pendingTransfers(), isEmpty);
+    expect(await ctrl.pendingUploads(), isEmpty);
     expect(ctrl.uploadFor('a/b'), isNull,
         reason: 'the live handle should be dropped too');
     expect(events.map((e) => e.type), contains(TransferEventType.completed),

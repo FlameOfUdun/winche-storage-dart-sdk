@@ -73,7 +73,7 @@ void main() {
 
       expect(p.split(cached), containsAllInOrder(['storage', 'cache']));
       expect(p.split(staged), containsAllInOrder(['storage', 'staging']));
-      // Siblings: clearOfflineCache() empties cache/ without touching an
+      // Siblings: clearCache() empties cache/ without touching an
       // upload that is still in flight.
       expect(p.isWithin(p.join(root, 'cache'), staged), isFalse);
     });
@@ -137,25 +137,25 @@ void main() {
       storage.child('shared/x.txt').uploadPath(src.path, enqueue: true);
       // Enqueueing is async — the first sembast open creates a directory — so
       // poll rather than guess a sleep long enough for a cold disk.
-      await _until(() async => (await storage.pendingTransfers()).isNotEmpty);
+      await _until(() async => (await storage.pendingUploads()).isNotEmpty);
 
       // A user switch, which core sequences: user-a's store is fully closed
       // before user-b's opens.
       auth.announce(WincheIdentity('user-b'));
       await app.settled;
 
-      expect(await storage.pendingTransfers(), isEmpty,
+      expect(await storage.pendingUploads(), isEmpty,
           reason: "user-b replayed user-a's queued upload");
       expect(
-        (await storage.child('shared/x.txt').offlineSnapshot()).exists,
-        isFalse,
+        await storage.child('shared/x.txt').cachedFile(),
+        isNull,
         reason: "user-b read user-a's cached file",
       );
 
       // Switching back finds user-a's own work still waiting.
       auth.announce(WincheIdentity('user-a'));
       await app.settled;
-      expect(await storage.pendingTransfers(), isNotEmpty,
+      expect(await storage.pendingUploads(), isNotEmpty,
           reason: "user-a's queued upload did not survive the switch away");
     });
 
@@ -164,7 +164,7 @@ void main() {
         auth.announce(WincheIdentity(id));
         await app.settled;
         // Touch the store so its sembast file is actually created.
-        await storage.pendingTransfers();
+        await storage.pendingUploads();
       }
       auth.announce(null);
       await app.settled;

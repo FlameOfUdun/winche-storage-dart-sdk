@@ -7,18 +7,21 @@ import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
 
-/// Download API that always fails at URL generation, so the DownloadTask ends
-/// in `failed` quickly without real network I/O.
+/// Upload API that always fails at record creation, so an UploadTask ends in
+/// `failed` quickly without real network I/O. [calls] counts how many times the
+/// controller actually drove an attempt.
 class _FailingApi extends NoopApi {
   int calls = 0;
-  @override
-  Future<DownloadSession> generateDownloadUrl(String path) async {
-    calls++;
-    throw Exception('offline');
-  }
 
   @override
   Future<FileData?> getFile(String path) async => null;
+
+  @override
+  Future<FileData> setFile(String path, String mimeType, int sizeBytes,
+      {Map<String, dynamic>? metadata}) async {
+    calls++;
+    throw Exception('offline');
+  }
 }
 
 void main() {
@@ -40,17 +43,24 @@ void main() {
         ),
       );
 
-  test('duplicate startDownload returns the same task and one record', () async {
+  test('duplicate startUpload returns the same task and one record', () async {
     final store = MemoryStorageLocalStore();
     final api = _FailingApi();
     final ctrl = build(api, store);
     final ref = ChildReference(path: 'a/b.png', api: api);
+    final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
 
-    final t1 = ctrl.startDownload(ref, saveTo: '${tmp.path}/out.png');
-    final t2 = ctrl.startDownload(ref, saveTo: '${tmp.path}/out.png');
+    final t1 = ctrl.startUpload(ref,
+        localPath: src.path,
+        mimeType: 'image/png',
+        multipartThreshold: 5 * 1024 * 1024);
+    final t2 = ctrl.startUpload(ref,
+        localPath: src.path,
+        mimeType: 'image/png',
+        multipartThreshold: 5 * 1024 * 1024);
     expect(identical(t1, t2), isTrue);
 
-    await t1.whenDone.catchError((_) {});
+    await t1.whenDone.catchError((_) => null);
     await Future<void>.delayed(const Duration(milliseconds: 100));
 
     final all = await TransferQueue(store).all();
@@ -58,21 +68,23 @@ void main() {
     await ctrl.close();
   });
 
-  test('a failing download is recorded as failed', () async {
+  test('a failing upload is recorded as failed', () async {
     final store = MemoryStorageLocalStore();
     final api = _FailingApi();
     final ctrl = build(api, store);
+    final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
 
-    final task = ctrl.startDownload(
+    final task = ctrl.startUpload(
       ChildReference(path: 'a/b.png', api: api),
-      saveTo: '${tmp.path}/out.png',
+      localPath: src.path,
+      mimeType: 'image/png',
+      multipartThreshold: 5 * 1024 * 1024,
     );
-    await task.whenDone.catchError((_) {});
+    await task.whenDone.catchError((_) => null);
     await Future<void>.delayed(const Duration(milliseconds: 100));
 
-    final q = TransferQueue(store);
-    final all = await q.all();
-    expect(all.single.kind, TransferKind.download);
+    final all = await TransferQueue(store).all();
+    expect(all.single.path, 'a/b.png');
     expect(all.single.status, TransferStatus.failed);
     await ctrl.close();
   });
@@ -82,7 +94,6 @@ void main() {
     final q = TransferQueue(store);
     TransferRecord rec(int seq, String path) => TransferRecord(
           seq: seq,
-          kind: TransferKind.download,
           path: path,
           localPath: '${tmp.path}/out',
           mimeType: null,
@@ -104,13 +115,11 @@ void main() {
     await ctrl.close();
   });
 
-  test('pendingTransfers returns the queue, filterable by kind', () async {
+  test('pendingUploads returns the queue', () async {
     final store = MemoryStorageLocalStore();
     final q = TransferQueue(store);
-    TransferRecord rec(int seq, TransferKind kind, String path) =>
-        TransferRecord(
+    TransferRecord rec(int seq, String path) => TransferRecord(
           seq: seq,
-          kind: kind,
           path: path,
           localPath: '${tmp.path}/$path',
           mimeType: null,
@@ -121,17 +130,46 @@ void main() {
           lastError: null,
           createdAt: DateTime.utc(2026, 1, 1),
         );
-    await q.enqueue((seq) => rec(seq, TransferKind.upload, 'up.png'));
-    await q.enqueue((seq) => rec(seq, TransferKind.download, 'down.png'));
+    await q.enqueue((seq) => rec(seq, 'up.png'));
+    await q.enqueue((seq) => rec(seq, 'other.png'));
 
     final ctrl = build(_FailingApi(), store);
 
-    expect((await ctrl.pendingTransfers()).map((r) => r.path).toSet(),
-        {'up.png', 'down.png'});
-    expect(
-        (await ctrl.pendingTransfers(kind: TransferKind.upload))
-            .map((r) => r.path),
-        ['up.png']);
+    // No `kind` filter: the queue holds uploads and nothing else.
+    expect((await ctrl.pendingUploads()).map((r) => r.path).toSet(),
+        {'up.png', 'other.png'});
+    await ctrl.close();
+  });
+
+  test('a download row from an older version is purged, never driven',
+      () async {
+    // Under the upload-only record shape this row would deserialize into an
+    // upload whose localPath is the *download destination* — and driving it
+    // would upload a partially fetched file over the server's copy.
+    final store = MemoryStorageLocalStore();
+    await store.putTransfer(1, {
+      'seq': 1,
+      'kind': 'download', // the field records no longer carry
+      'path': 'a/b.png',
+      'localPath': '${tmp.path}/out.png',
+      'mimeType': null,
+      'metadata': null,
+      'multipartThreshold': null,
+      'status': 'pending',
+      'attempt': 0,
+      'lastError': null,
+      'createdAt': DateTime.utc(2026, 1, 1).toIso8601String(),
+      'pinned': false,
+    });
+
+    final api = _FailingApi();
+    final ctrl = build(api, store);
+    await ctrl.rehydrate();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(await ctrl.pendingUploads(), isEmpty);
+    expect(await store.allTransfers(), isEmpty, reason: 'row was not purged');
+    expect(api.calls, 0, reason: 'the legacy download row was driven');
     await ctrl.close();
   });
 
@@ -139,11 +177,14 @@ void main() {
     final store = MemoryStorageLocalStore();
     final api = _FailingApi();
     final q = TransferQueue(store);
+    // The record's localPath is an upload *source* now, so it has to exist:
+    // without it the task fails reading the file and never reaches the API,
+    // which would make this pass for the wrong reason.
+    final src = File('${tmp.path}/out.png')..writeAsBytesSync([1, 2, 3]);
     await q.enqueue((seq) => TransferRecord(
           seq: seq,
-          kind: TransferKind.download,
           path: 'a/b.png',
-          localPath: '${tmp.path}/out.png',
+          localPath: src.path,
           mimeType: null,
           metadata: null,
           multipartThreshold: null,

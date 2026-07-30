@@ -1,6 +1,5 @@
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/transfer_event.dart';
-import 'package:winche_storage/src/offline/transfer_record.dart';
 
 void main() {
   test('TransferRetryConfig has sane defaults', () {

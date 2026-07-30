@@ -11,7 +11,6 @@ void main() {
       reference: ref,
       timestamp: DateTime.utc(2026, 1, 1),
     );
-    expect(snap.fromCache, isFalse);
     expect(snap.name, 'dir');
     expect(snap.length, 0);
     expect(snap.isEmpty, isTrue);

@@ -68,33 +68,63 @@ void main() {
         multipartThreshold: 5 * 1024 * 1024,
       );
 
-  group('listChildren (server-only)', () {
-    test('returns fromCache=false with a FileSnapshot per record', () async {
+  group('listChildren', () {
+    test('returns a FileSnapshot per server record', () async {
       final api = _ListApi([_data('dir/a.png'), _data('dir/b.png')]);
       final ref = ChildReference(path: 'dir', api: api);
 
       final snap = await ref.listChildren();
 
-      expect(snap.fromCache, isFalse);
       expect(
           snap.files.map((f) => f.reference.path), ['dir/a.png', 'dir/b.png']);
       expect(snap.length, 2);
       expect(snap.name, 'dir');
     });
 
-    test('does not enrich isCached/localPath from the catalog', () async {
-      final api = _ListApi([_data('dir/a.png')]);
+    test('annotates each file with this device cache state', () async {
+      // Replaces the old pattern of calling listChildren() *and*
+      // offlineChildren() and hand-building a Set of paths to cross-reference.
+      final api = _ListApi([_data('dir/a.png'), _data('dir/b.png')]);
       final cat = catFor(api);
       await cat.debugPut(_entry('dir/a.png', tmp.path));
       final ref = ChildReference(path: 'dir', api: api, catalog: cat);
 
       final snap = await ref.listChildren();
+      final byPath = {for (final f in snap.files) f.reference.path: f};
 
-      expect(snap.files.single.data!.isCached, isFalse);
-      expect(snap.files.single.data!.localPath, isNull);
+      expect(byPath['dir/a.png']!.isCached, isTrue);
+      expect(byPath['dir/a.png']!.localPath, isNotNull);
+      expect(byPath['dir/b.png']!.isCached, isFalse);
+      expect(byPath['dir/b.png']!.localPath, isNull);
+    });
+
+    test('a row that is not ready does not count as cached', () async {
+      final api = _ListApi([_data('dir/a.png')]);
+      final cat = catFor(api);
+      await cat.debugPut(CatalogEntry(
+        data: _data('dir/a.png'),
+        localPath: '${tmp.path}/dir_a.png',
+        pinnedAt: DateTime.utc(2026, 1, 1),
+        status: CatalogStatus.downloading,
+      ));
+      final ref = ChildReference(path: 'dir', api: api, catalog: cat);
+
+      final snap = await ref.listChildren();
+
+      expect(snap.files.single.isCached, isFalse);
+    });
+
+    test('works with no catalog at all', () async {
+      final api = _ListApi([_data('dir/a.png')]);
+      final ref = ChildReference(path: 'dir', api: api);
+
+      final snap = await ref.listChildren();
+
+      expect(snap.files.single.isCached, isFalse);
     });
 
     test('throws offline even with a catalog', () async {
+      // Listings are never cached: there is no offline branch to fall back to.
       final api = _OfflineListApi();
       final cat = catFor(api);
       await cat.debugPut(_entry('dir/a.png', tmp.path));
@@ -113,57 +143,17 @@ void main() {
       final ref = ChildReference(path: 'dir', api: api, catalog: catFor(api));
       expect(ref.listChildren, throwsA(isA<StorageInternalException>()));
     });
-  });
 
-  group('offlineChildren (cache-only)', () {
-    test('returns pinned files directly under the path, fromCache=true',
-        () async {
-      final cat = catFor(NoopApi());
-      for (final p in [
-        'dir/a.png',
-        'dir/b.png',
-        'dir/sub/c.png',
-        'other/d.png'
-      ]) {
-        await cat.debugPut(_entry(p, tmp.path));
-      }
-      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
+    test('the mimeType filter is passed to the server', () async {
+      final api = _ListApi([
+        _data('dir/a.png', mime: 'image/png'),
+        _data('dir/b.jpg', mime: 'image/jpeg'),
+      ]);
+      final ref = ChildReference(path: 'dir', api: api);
 
-      final snap = await ref.offlineChildren();
+      final snap = await ref.listChildren(mimeType: 'image/jpeg');
 
-      expect(snap.fromCache, isTrue);
-      expect(snap.files.map((f) => f.reference.path).toList()..sort(),
-          ['dir/a.png', 'dir/b.png']);
-      expect(snap.files.every((f) => f.fromCache), isTrue);
-    });
-
-    test('applies the mimeType filter', () async {
-      final cat = catFor(NoopApi());
-      await cat.debugPut(_entry('dir/a.png', tmp.path, mime: 'image/png'));
-      await cat.debugPut(_entry('dir/b.jpg', tmp.path, mime: 'image/jpeg'));
-      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
-
-      final snap = await ref.offlineChildren(mimeType: 'image/jpeg');
-
-      expect(snap.fromCache, isTrue);
       expect(snap.files.map((f) => f.reference.path), ['dir/b.jpg']);
-    });
-
-    test('empty (fromCache=true) when nothing is pinned under the path',
-        () async {
-      final cat = catFor(NoopApi());
-      await cat.debugPut(_entry('other/d.png', tmp.path));
-      final ref = ChildReference(path: 'dir', api: NoopApi(), catalog: cat);
-
-      final snap = await ref.offlineChildren();
-
-      expect(snap.fromCache, isTrue);
-      expect(snap.files, isEmpty);
-    });
-
-    test('throws StateError with no store', () async {
-      final ref = ChildReference(path: 'dir', api: NoopApi());
-      expect(ref.offlineChildren, throwsStateError);
     });
   });
 }

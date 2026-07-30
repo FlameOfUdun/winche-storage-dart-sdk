@@ -17,37 +17,45 @@ FileData _data() => FileData(
     );
 
 void main() {
-  test('fromData defaults: not from cache, data not cached, no localPath', () {
+  test('a server snapshot carries no device state by default', () {
     final ref = ChildReference(path: 'a/b.png', api: NoopApi());
     final s = FileSnapshot.fromData(_data(), reference: ref);
-    expect(s.fromCache, isFalse);
-    expect(s.data!.localPath, isNull);
-    expect(s.data!.isCached, isFalse);
-  });
 
-  test('data can carry localPath and isCached', () {
-    final ref = ChildReference(path: 'a/b.png', api: NoopApi());
-    final data = _data().copyWith(localPath: '/cache/rec1.png', isCached: true);
-    final s = FileSnapshot.fromData(data, reference: ref);
-    expect(s.fromCache, isFalse);
-    expect(s.data!.localPath, '/cache/rec1.png');
-    expect(s.data!.isCached, isTrue);
-  });
-
-  test('fromCachedEntry sets fromCache and folds localPath/isCached into data',
-      () {
-    final ref = ChildReference(path: 'a/b.png', api: NoopApi());
-    final entry = CatalogEntry(
-      data: _data(),
-      localPath: '/cache/rec1.png',
-      pinnedAt: DateTime.utc(2026, 1, 2),
-      status: CatalogStatus.ready,
-    );
-    final s = FileSnapshot.fromCachedEntry(entry, reference: ref);
     expect(s.exists, isTrue);
-    expect(s.fromCache, isTrue);
-    expect(s.data!.localPath, '/cache/rec1.png');
-    expect(s.data!.isCached, isTrue);
-    expect(s.data!.id, 'rec1');
+    expect(s.isCached, isFalse);
+    expect(s.localPath, isNull);
+  });
+
+  test('annotation records this device cache state on the snapshot', () {
+    final ref = ChildReference(path: 'a/b.png', api: NoopApi());
+    final s = FileSnapshot.fromData(
+      _data(),
+      reference: ref,
+      isCached: true,
+      localPath: '/cache/rec1.png',
+    );
+
+    expect(s.isCached, isTrue);
+    expect(s.localPath, '/cache/rec1.png');
+  });
+
+  test('FileData stays a pure wire model', () {
+    // localPath/isCached used to live here, so a model that otherwise mirrors
+    // the server carried two fields the server never sends. Anything on
+    // FileData now came from the server.
+    final json = _data().toJson();
+
+    expect(json.containsKey('localPath'), isFalse);
+    expect(json.containsKey('isCached'), isFalse);
+    expect(json.containsKey('contentHash'), isTrue); // server-side, stays
+  });
+
+  test('a missing snapshot is never annotated', () {
+    final ref = ChildReference(path: 'a/b.png', api: NoopApi());
+    final s = FileSnapshot.missing(ref);
+
+    expect(s.exists, isFalse);
+    expect(s.isCached, isFalse);
+    expect(s.localPath, isNull);
   });
 }
