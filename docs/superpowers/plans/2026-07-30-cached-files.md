@@ -597,9 +597,35 @@ quietly turn the list path into a row-only read that hands back paths which do
 not open. Write them, watch them pass, commit.
 
 **Files:**
+- Modify: `lib/src/child_reference.dart` (one doc sentence)
 - Modify: `test/offline/cached_files_test.dart`
 
-- [ ] **Step 1: Add the edge-case tests**
+- [ ] **Step 1: Tighten two claims Task 2b's verification found overbroad**
+
+In `lib/src/child_reference.dart`, `cachedFiles()`'s doc says "no path
+normalization happens anywhere in this package." That is false as written —
+`local_paths.dart` normalizes *disk* paths. It is true of the logical paths a
+reference is built from, which is what the sentence is about. Replace that
+paragraph with:
+
+```dart
+  /// Matching is on the exact parent path, so `u1` never picks up `u10`'s
+  /// files — and equally, a reference built with a trailing slash matches
+  /// nothing, since nothing normalizes the path a reference carries.
+```
+
+In `test/offline/cached_files_test.dart`, the test `is empty for a path that is
+itself a cached file` passes trivially today: `_parentDir(p)` can never equal
+`p`, so it cannot fail for the reason its name suggests. It still guards a real
+regression class. Replace its comment with one that says which:
+
+```dart
+    // A path is a file or a directory depending on which method you call on
+    // it. Exact-parent matching makes this fall out for free — the value is as
+    // a guard on the prefix-matching reimplementation that would not.
+```
+
+- [ ] **Step 2: Add the edge-case tests**
 
 Append these inside `main()`, after the existing `test(...)` calls:
 
@@ -644,17 +670,22 @@ Append these inside `main()`, after the existing `test(...)` calls:
   });
 ```
 
-- [ ] **Step 2: Run them**
+- [ ] **Step 3: Run them**
 
 Run: `dart test test/offline/cached_files_test.dart`
 Expected: 10 tests pass. If any of the first four new ones fails,
 `_verifiedFile` is not being reused by `cachedFilesIn` — fix that rather than
 the test.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Run the full suite and analyzer**
+
+Run: `dart test && dart analyze`
+Expected: 191 tests pass; `No issues found!`
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add test/offline/cached_files_test.dart
+git add lib/src/child_reference.dart test/offline/cached_files_test.dart
 git commit -m "test: pin cachedFiles() byte verification to the disk"
 ```
 
