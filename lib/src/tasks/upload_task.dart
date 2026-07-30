@@ -174,7 +174,7 @@ abstract class UploadTask {
     if (_stageSource != null) {
       if (_stagedPath == null) {
         try {
-          _stagedPath = await _stageSource!();
+          _stagedPath = await _stageSource();
         } catch (_) {
           _stagedPath = null; // fall back to the original source
         }

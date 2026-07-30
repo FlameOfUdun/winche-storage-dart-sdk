@@ -104,7 +104,7 @@ class OfflineCatalog implements UploadPinSink {
     // Route through the controller when present (durable + de-duped); otherwise
     // run a direct task. Either way, observe the same DownloadTask.
     final DownloadTask task = _controller != null
-        ? _controller!.startDownload(ref, saveTo: localPath)
+        ? _controller.startDownload(ref, saveTo: localPath)
         : DownloadTask.start(
             reference: ref,
             saveTo: localPath,
