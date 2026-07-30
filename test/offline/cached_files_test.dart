@@ -6,11 +6,6 @@ import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
 
-/// Inherits [NoopApi], so every method throws [UnimplementedError]. Any test
-/// that passes without an override is proof `cachedFiles()` never contacts the
-/// server.
-class _OfflineApi extends NoopApi {}
-
 FileData _data(String path, {required String id, int sizeBytes = 3}) => FileData(
       id: id,
       directory: path.substring(0, path.lastIndexOf('/')),
@@ -42,6 +37,20 @@ void main() {
         directoryResolver: () async => tmp.path,
       );
 
+  /// A catalog and a reference to [path] on it, over a shared api.
+  ///
+  /// That api defaults to a bare [NoopApi], whose every method throws — so a
+  /// test that passes through this fixture is proof `cachedFiles()` never
+  /// reached the server.
+  (OfflineCatalog, ChildReference) fixture({
+    String path = 'u1',
+    WincheStorageApi? api,
+  }) {
+    final resolved = api ?? NoopApi();
+    final cat = catFor(resolved);
+    return (cat, ChildReference(path: path, api: resolved, catalog: cat));
+  }
+
   /// Seeds a catalog row for [path]. [byteCount] bytes are written to disk —
   /// pass null to write none, or a value other than [sizeBytes] for a partial.
   Future<void> seed(
@@ -65,13 +74,11 @@ void main() {
   }
 
   test('returns the direct children whose bytes are complete', () async {
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/a.png', id: 'a');
     await seed(cat, 'u1/photos/b.png', id: 'b'); // deeper — not a direct child
     await seed(cat, 'u2/c.png', id: 'c'); // another directory
     await seed(cat, 'u1/gone.png', id: 'gone', byteCount: null); // row, no bytes
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     final files = await ref.cachedFiles();
 
@@ -82,22 +89,38 @@ void main() {
   });
 
   test('is sorted by path', () async {
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u1/c.png', id: 'c');
     await seed(cat, 'u1/a.png', id: 'a');
     await seed(cat, 'u1/b.png', id: 'b');
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
 
     expect((await ref.cachedFiles()).map((f) => f.path),
         ['u1/a.png', 'u1/b.png', 'u1/c.png']);
   });
 
   test('is empty when nothing under the path is cached', () async {
-    final api = _OfflineApi();
-    final cat = catFor(api);
+    final (cat, ref) = fixture();
     await seed(cat, 'u2/c.png', id: 'c');
-    final ref = ChildReference(path: 'u1', api: api, catalog: cat);
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('reads a nested directory, not only a top-level one', () async {
+    // Every other test queries a single-segment path. Without this, the
+    // exclusion of `u1/photos/b.png` above could be passing for the wrong
+    // reason — a rule that drops everything below depth 1 would look identical.
+    final (cat, ref) = fixture(path: 'u1/photos');
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u1/photos/b.png', id: 'b');
+
+    expect((await ref.cachedFiles()).map((f) => f.path), ['u1/photos/b.png']);
+  });
+
+  test('is empty for a path that is itself a cached file', () async {
+    // A path is a file or a directory depending on which method you call on
+    // it. This one asks the directory question, and a file has no children.
+    final (cat, ref) = fixture(path: 'u1/a.png');
+    await seed(cat, 'u1/a.png', id: 'a');
 
     expect(await ref.cachedFiles(), isEmpty);
   });

@@ -66,8 +66,8 @@ class OfflineCatalog implements UploadPinSink {
   /// The cached copy at [path], or null when this device has no usable bytes.
   ///
   /// Absence is not an error: "I do not have these bytes" is an ordinary
-  /// answer, and a caller that gets one back has a `localPath` it can open —
-  /// which is what this call is for. A row this returns null for is repaired
+  /// answer, not a failure. A non-null result is one a caller can act on
+  /// directly — its `localPath` opens. A row this returns null for is repaired
   /// by the next [pin].
   Future<CachedFile?> cachedFile(String path) async {
     final entry = await entryFor(path);
@@ -97,13 +97,16 @@ class OfflineCatalog implements UploadPinSink {
   /// The cached files whose parent directory is exactly [directory], sorted by
   /// path.
   ///
-  /// One level only, mirroring a directory listing. Verified through
-  /// [_verifiedFile], so a row whose bytes are absent or incomplete is omitted
-  /// rather than returned in a degraded form.
+  /// One level, because the server's listing is one level: a recursive variant
+  /// would cover a different set than [ChildReference.listChildren], and
+  /// comparing the two is the point of having both. Verified through
+  /// [_verifiedFile].
   Future<List<CachedFile>> cachedFilesIn(String directory) async {
     final out = <CachedFile>[];
     for (final entry in await all()) {
       if (_parentDir(entry.path) != directory) continue;
+      // Sequential on purpose: `Future.wait` over these stats would save
+      // microseconds and risk a descriptor storm on a large directory.
       final file = await _verifiedFile(entry);
       if (file != null) out.add(file);
     }
@@ -111,8 +114,15 @@ class OfflineCatalog implements UploadPinSink {
     return out;
   }
 
-  /// The parent directory of [p] — everything before the final `/` — or `''`
-  /// when [p] has no slash.
+  /// The parent directory of [p] — everything before the final `/`.
+  ///
+  /// Derived from the key rather than read from `data.directory`: that field
+  /// is the server's, nothing local keeps it in step with the key a row is
+  /// stored under, and the result of [cachedFilesIn] is a list of keys.
+  ///
+  /// A slashless path yields `''`. That is the root, which [ChildReference]
+  /// models as a null parent rather than as an address; the two only meet if a
+  /// caller builds `child('')`, which nothing in the API produces on its own.
   String _parentDir(String p) {
     final i = p.lastIndexOf('/');
     return i < 0 ? '' : p.substring(0, i);
