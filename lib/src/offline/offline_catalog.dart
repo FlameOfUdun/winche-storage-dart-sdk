@@ -7,12 +7,13 @@ import '../api/winche_storage_api.dart';
 import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
 import '../models/file_data.dart';
+import '../models/upload_status.dart';
 import '../tasks/download_task.dart';
+import 'cache_status.dart';
+import 'cached_file.dart';
 import 'catalog_entry.dart';
 import 'local_paths.dart';
-import 'offline_copy_status.dart';
 import 'storage_local_store.dart';
-import 'transfer_controller.dart';
 import 'upload_pin_sink.dart';
 
 /// Tracks files pinned for offline availability. Owns an id-keyed cache
@@ -25,22 +26,19 @@ class OfflineCatalog implements UploadPinSink {
     required StorageLocalStore store,
     required Future<String> Function()? directoryResolver,
     int multipartThreshold = 5 * 1024 * 1024, // accepted for API symmetry; downloads don't use it
-    TransferController? controller,
     Dio? httpClient,
   })  : _api = api,
         _store = store,
         _directoryResolver = directoryResolver,
-        _controller = controller,
         _httpClient = httpClient;
 
   final WincheStorageApi _api;
   final StorageLocalStore _store;
   final Future<String> Function()? _directoryResolver;
-  final TransferController? _controller;
   final Dio? _httpClient;
 
-  /// In-flight pins keyed by path — de-dups concurrent pin/refresh calls.
-  final Map<String, Future<void>> _activePins = {};
+  /// In-flight downloads keyed by path — de-dups concurrent cache/refresh calls.
+  final Map<String, Future<CachedFile>> _activePins = {};
 
   Future<CatalogEntry?> entryFor(String path) async {
     final raw = await _store.getCatalog(path);
@@ -50,43 +48,75 @@ class OfflineCatalog implements UploadPinSink {
   Future<List<CatalogEntry>> all() async =>
       [for (final j in await _store.allCatalog()) CatalogEntry.fromJson(j)];
 
-  /// Pins [ref] for offline use: downloads it to `<dir>/<id><.ext>` and tracks
-  /// it. When [ref] is a directory (no file record, but files listed directly
-  /// under it), pins each of those files instead. Completes when the download(s)
-  /// finish. A second pin/refresh for the same path while one is in flight
-  /// returns the same future.
-  Future<void> pin(ChildReference ref) => _download(ref);
+  /// The cached copy at [path], or null when this device has no usable bytes.
+  ///
+  /// Verifies against the filesystem rather than trusting the row's status: the
+  /// disk is what actually answers "do I have these bytes", and this call is
+  /// about to hand out a path someone will open. It also means a row left
+  /// `downloading` by a process kill stops being a permanent blocker — the
+  /// bytes decide, so the next [pin] repairs it.
+  Future<CachedFile?> cachedFile(String path) async {
+    final entry = await entryFor(path);
+    if (entry == null) return null;
+    final file = File(entry.localPath);
+    if (!await file.exists()) return null;
+    if (await file.length() != entry.data.sizeBytes) return null;
+    return CachedFile(
+      reference: _refFor(path),
+      data: entry.data,
+      localPath: entry.localPath,
+      cachedAt: entry.pinnedAt,
+    );
+  }
 
-  /// Re-downloads the current remote version of a pinned file.
-  Future<void> refresh(ChildReference ref) => _download(ref);
+  /// Ensures [ref] is cached, returning the existing copy when the bytes are
+  /// already complete. Downloads only when they are not — for an unconditional
+  /// re-download use [refresh].
+  ///
+  /// A second call for the same path while a download is in flight returns the
+  /// same future.
+  Future<CachedFile> pin(ChildReference ref) async {
+    final existing = await cachedFile(ref.path);
+    if (existing != null) return existing;
+    return _download(ref);
+  }
 
-  Future<void> _download(ChildReference ref) {
+  /// Re-downloads the current remote version, replacing any cached bytes.
+  Future<CachedFile> refresh(ChildReference ref) => _download(ref);
+
+  Future<CachedFile> _download(ChildReference ref) {
     final existing = _activePins[ref.path];
     if (existing != null) return existing;
     final fut = _doDownload(ref);
     _activePins[ref.path] = fut;
     // Cleanup only — the caller observes success/failure via the returned [fut];
-    // `.ignore()` keeps a failed pin from surfacing here as an unhandled error.
+    // `.ignore()` keeps a failed download from surfacing here as an unhandled
+    // error.
     fut.whenComplete(() {
       if (identical(_activePins[ref.path], fut)) _activePins.remove(ref.path);
     }).ignore();
     return fut;
   }
 
-  Future<void> _doDownload(ChildReference ref) async {
+  Future<CachedFile> _doDownload(ChildReference ref) async {
     final remote = await _api.getFile(ref.path);
     if (remote == null) {
-      // No file record at this path. If it's a directory — i.e. the server lists
-      // files directly under it — pin each of those files. (listDirectory returns
-      // one level only, so nested sub-directories are not included.) A genuinely
-      // missing path lists empty and surfaces the not-found error.
-      final files = await _api.listDirectory(ref.path);
-      if (files.isEmpty) {
-        throw StateError('Cannot pin "${ref.path}": not found on server.');
-      }
-      await Future.wait([for (final f in files) _download(_refFor(f.path))]);
-      return;
+      throw StorageNotFoundException('No file at "${ref.path}".');
     }
+    // uploadStatus is the server's own statement about whether bytes exist.
+    // contentHash being null is a symptom of the same thing, so key on the
+    // statement rather than on the symptom.
+    if (remote.uploadStatus != UploadStatus.complete) {
+      throw StorageFailedPreconditionException(
+        remote.uploadStatus == UploadStatus.pending
+            ? 'The file at "${ref.path}" is still uploading, so there are no '
+                'bytes to cache yet. To cache a file you are uploading, use '
+                'uploadPath(..., cache: true).'
+            : 'The upload for "${ref.path}" failed, so the server has no bytes '
+                'to serve. It must be re-uploaded before it can be cached.',
+      );
+    }
+
     final resolver = _directoryResolver;
     if (resolver == null) {
       throw StateError(
@@ -94,53 +124,74 @@ class OfflineCatalog implements UploadPinSink {
     }
     final localPath = await _cachePath(await resolver(), remote, ref.name);
 
+    // Resume guard. Appending to a partial written from different bytes yields
+    // a file that passes a length check and is silently corrupt. Both hashes
+    // are always present here: uploadStatus == complete implies a contentHash.
+    final previous = await entryFor(ref.path);
+    final partial = File(localPath);
+    var canResume = false;
+    if (previous != null && await partial.exists()) {
+      canResume = previous.data.contentHash == remote.contentHash;
+      if (!canResume) await partial.delete();
+    }
+
     await _put(CatalogEntry(
       data: remote,
       localPath: localPath,
       pinnedAt: DateTime.now(),
       status: CatalogStatus.downloading,
+      etag: canResume ? previous?.etag : null,
     ));
 
-    // Route through the controller when present (durable + de-duped); otherwise
-    // run a direct task. Either way, observe the same DownloadTask.
-    final DownloadTask task = _controller != null
-        ? _controller.startDownload(ref, saveTo: localPath)
-        : DownloadTask.start(
-            reference: ref,
-            saveTo: localPath,
-            httpClient: _httpClient,
-          );
+    final task = DownloadTask.start(
+      reference: ref,
+      saveTo: localPath,
+      httpClient: _httpClient,
+      isResume: canResume,
+      ifRangeEtag: canResume ? previous?.etag : null,
+    );
 
-    await task.whenDone; // throws on failure — the entry stays `downloading`.
+    await task.whenDone; // throws on failure — the row stays `downloading`.
 
-    final fresh = await entryFor(ref.path);
-    if (fresh != null) {
-      await _put(fresh.copyWith(status: CatalogStatus.ready));
-    }
+    final entry = CatalogEntry(
+      data: remote,
+      localPath: localPath,
+      pinnedAt: DateTime.now(),
+      status: CatalogStatus.ready,
+      etag: task.observedEtag,
+    );
+    await _put(entry);
+    return CachedFile(
+      reference: ref,
+      data: entry.data,
+      localPath: entry.localPath,
+      cachedAt: entry.pinnedAt,
+    );
   }
 
-  /// The freshness of the pinned copy at [path] relative to the server. Compares
-  /// the cached content fingerprint against the current remote one; returns
-  /// [OfflineCopyStatus.unknown] when offline or when either fingerprint is
-  /// absent. Other (non-offline) API errors propagate.
-  Future<OfflineCopyStatus> offlineCopyStatus(String path) async {
+  /// Compares the cached copy at [path] against the server's current record.
+  ///
+  /// Round-trips — unlike every other cache read. "Not cached" is deliberately
+  /// not one of the results: it is `cachedFile() == null`, answerable locally.
+  /// Non-offline API errors propagate.
+  Future<CacheStatus> checkForUpdate(String path) async {
     final entry = await entryFor(path);
-    if (entry == null) return OfflineCopyStatus.notPinned;
+    if (entry == null) return CacheStatus.unknown;
     final FileData? remote;
     try {
       remote = await _api.getFile(path);
     } on StorageUnavailableException {
-      return OfflineCopyStatus.unknown;
+      return CacheStatus.unknown;
     }
-    if (remote == null) return OfflineCopyStatus.remoteDeleted;
-    final remoteHash = remote.contentHash;
-    final cachedHash = entry.data.contentHash;
-    if (remoteHash == null || cachedHash == null) {
-      return OfflineCopyStatus.unknown;
+    if (remote == null) return CacheStatus.remoteDeleted;
+    // The server's own statement that it holds no bytes. Distinct from
+    // `unknown`, which now means only "could not ask".
+    if (remote.uploadStatus != UploadStatus.complete) {
+      return CacheStatus.remoteIncomplete;
     }
-    return remoteHash == cachedHash
-        ? OfflineCopyStatus.upToDate
-        : OfflineCopyStatus.contentChanged;
+    return remote.contentHash == entry.data.contentHash
+        ? CacheStatus.upToDate
+        : CacheStatus.contentChanged;
   }
 
   /// Updates a pinned file's cached metadata after a successful server write,

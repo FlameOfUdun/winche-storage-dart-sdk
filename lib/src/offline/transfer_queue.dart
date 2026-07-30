@@ -15,8 +15,27 @@ class TransferQueue {
     return seq;
   }
 
-  Future<List<TransferRecord>> all() async =>
-      [for (final j in await _store.allTransfers()) TransferRecord.fromJson(j)];
+  Future<List<TransferRecord>> all() async => [
+        for (final j in await _store.allTransfers())
+          if (!_isLegacyDownload(j)) TransferRecord.fromJson(j)
+      ];
+
+  /// True for a row written before downloads left the durable queue.
+  ///
+  /// These must never be deserialized: the record shape is now upload-only, so
+  /// a download row would come back as an upload whose `localPath` is the
+  /// *download destination* — and driving it would upload a partially fetched
+  /// file over the server's copy. [purgeLegacyDownloads] deletes them.
+  static bool _isLegacyDownload(Map<String, Object?> json) =>
+      json['kind'] == 'download';
+
+  /// Deletes any download rows left by an earlier version. Called once per
+  /// session, before rehydration.
+  Future<void> purgeLegacyDownloads() async {
+    for (final j in await _store.allTransfers()) {
+      if (_isLegacyDownload(j)) await _store.removeTransfer(j['seq'] as int);
+    }
+  }
 
   Future<TransferRecord?> get(int seq) async {
     for (final r in await all()) {

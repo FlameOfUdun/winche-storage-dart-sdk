@@ -1,63 +1,54 @@
 import 'child_reference.dart';
 import 'models/file_data.dart';
-import 'offline/catalog_entry.dart';
 
-/// An immutable snapshot of a file's metadata at a point in time.
+/// An immutable snapshot of a file's server record at a point in time.
 ///
-/// Mirrors the ergonomics of `winche_database`'s `DocumentSnapshot`: [exists]
-/// is false when the file is not present (then [data] is null).
+/// Always a server read — `winche_storage` caches file *content*, never
+/// metadata, so there is no second source a snapshot could have come from.
+/// What this device holds is reported by [isCached] / [localPath].
 final class FileSnapshot {
   final ChildReference reference;
   final bool exists;
   final DateTime timestamp;
 
-  /// The file record, or null when [exists] is false.
+  /// The server record, or null when [exists] is false.
   final FileData? data;
 
-  /// True when [data] was served from the local offline catalog because the
-  /// server was unreachable. False for an authoritative server response.
+  /// True when this device has complete bytes for this file.
   ///
-  /// This describes how the *metadata* was obtained. Whether the file's
-  /// *content* is downloaded locally is `data.isCached` (with `data.localPath`).
-  final bool fromCache;
+  /// Advisory: read from the catalog row, so a listing costs one bulk read
+  /// rather than a filesystem check per file. For an authoritative answer — and
+  /// a path guaranteed to open — use [ChildReference.cachedFile].
+  final bool isCached;
+
+  /// Absolute path to the local bytes when [isCached], else null.
+  final String? localPath;
 
   const FileSnapshot._({
     required this.reference,
     required this.exists,
     required this.timestamp,
     required this.data,
-    required this.fromCache,
+    required this.isCached,
+    required this.localPath,
   });
 
-  /// A present snapshot wrapping [data].
+  /// A present snapshot wrapping [data], optionally annotated with this
+  /// device's cache state.
   factory FileSnapshot.fromData(
     FileData data, {
     required ChildReference reference,
     DateTime? timestamp,
-    bool fromCache = false,
+    bool isCached = false,
+    String? localPath,
   }) =>
       FileSnapshot._(
         reference: reference,
         exists: true,
         timestamp: timestamp ?? DateTime.now(),
         data: data,
-        fromCache: fromCache,
-      );
-
-  /// A present snapshot built from a cached [entry] (server unreachable). The
-  /// entry's local-copy info is folded into [data] (`localPath` + `isCached`).
-  factory FileSnapshot.fromCachedEntry(
-    CatalogEntry entry, {
-    required ChildReference reference,
-    DateTime? timestamp,
-  }) =>
-      FileSnapshot._(
-        reference: reference,
-        exists: true,
-        timestamp: timestamp ?? DateTime.now(),
-        data: entry.data
-            .copyWith(localPath: entry.localPath, isCached: entry.isCached),
-        fromCache: true,
+        isCached: isCached,
+        localPath: localPath,
       );
 
   /// A non-existent snapshot for [reference].
@@ -66,7 +57,8 @@ final class FileSnapshot {
         exists: false,
         timestamp: DateTime.now(),
         data: null,
-        fromCache: false,
+        isCached: false,
+        localPath: null,
       );
 
   /// The last path segment (e.g. `a.png`).

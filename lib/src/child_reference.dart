@@ -5,9 +5,11 @@ import 'package:mime/mime.dart';
 import 'api/winche_storage_api.dart';
 import 'directory_snapshot.dart';
 import 'file_snapshot.dart';
+import 'offline/cache_status.dart';
+import 'offline/cached_file.dart';
+import 'offline/catalog_entry.dart';
 import 'offline/live_task_registry.dart';
 import 'offline/offline_catalog.dart';
-import 'offline/offline_copy_status.dart';
 import 'offline/transfer_controller.dart';
 import 'storage_binding.dart';
 import 'tasks/download_task.dart';
@@ -121,81 +123,59 @@ final class ChildReference {
   /// Returns a new [ChildReference] for a child path.
   ChildReference child(String path) => _withPath('${this.path}/$path');
 
-  /// Fetches the file's metadata from the server. Server-only: it does not
-  /// consult the offline cache and throws `StorageUnavailableException` when the
-  /// server is unreachable. A server-confirmed absence yields a missing snapshot.
-  /// For the cached copy, use [offlineSnapshot].
+  /// Fetches the file's record from the server, annotated with whether this
+  /// device has its bytes cached.
+  ///
+  /// Always live: directory and metadata reads are never served from a cache, so
+  /// this throws `StorageUnavailableException` when the server is unreachable. A
+  /// server-confirmed absence yields a missing snapshot. For the local bytes
+  /// without any network call, use [cachedFile].
   Future<FileSnapshot> getSnapshot() async {
     final data = await api.getFile(path);
     if (data == null) return FileSnapshot.missing(this);
-    return FileSnapshot.fromData(data, reference: this);
+    final row = await catalog?.entryFor(path);
+    final cached = row != null && row.status == CatalogStatus.ready;
+    return FileSnapshot.fromData(
+      data,
+      reference: this,
+      isCached: cached,
+      localPath: cached ? row.localPath : null,
+    );
   }
 
   /// Lists the files in the directory at this reference's path, optionally
-  /// filtered by [mimeType]. Returns a [DirectorySnapshot] whose `files` holds a
-  /// [FileSnapshot] per child file.
+  /// filtered by [mimeType]. Each [FileSnapshot] is annotated with whether this
+  /// device has that file's bytes cached, so a listing alone is enough to badge
+  /// what is available offline.
   ///
-  /// Server-only: it does not consult the offline cache and throws
-  /// `StorageUnavailableException` when the server is unreachable. For the locally
-  /// pinned files under this path, use [offlineChildren].
+  /// Always live — listings are never cached — so this throws
+  /// `StorageUnavailableException` when the server is unreachable.
   Future<DirectorySnapshot> listChildren({String? mimeType}) async {
     final timestamp = DateTime.now();
     final files = await api.listDirectory(path, mimeType: mimeType);
-    final snapshots = files
-        .map((file) => FileSnapshot.fromData(
-              file,
-              timestamp: timestamp,
-              reference: _childRef(file.path),
-            ))
-        .toList();
+    // One bulk catalog read for the whole listing, rather than a filesystem
+    // check per file. Advisory by design: this renders a badge. [cachedFile] is
+    // the authoritative check, because it hands out a path someone will open.
+    final rows = {
+      for (final e in await catalog?.all() ?? const <CatalogEntry>[])
+        e.path: e,
+    };
+    final snapshots = files.map((file) {
+      final row = rows[file.path];
+      final cached = row != null && row.status == CatalogStatus.ready;
+      return FileSnapshot.fromData(
+        file,
+        timestamp: timestamp,
+        reference: _childRef(file.path),
+        isCached: cached,
+        localPath: cached ? row.localPath : null,
+      );
+    }).toList();
     return DirectorySnapshot.fromFiles(snapshots,
-        reference: this, timestamp: timestamp, fromCache: false);
-  }
-
-  /// The cached offline copy's metadata, read straight from the local catalog
-  /// without contacting the server ([FileSnapshot.fromCache] true). Returns a
-  /// missing snapshot when this file isn't pinned. Requires a configured store.
-  Future<FileSnapshot> offlineSnapshot() async {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    final entry = await c.entryFor(path);
-    if (entry == null) return FileSnapshot.missing(this);
-    return FileSnapshot.fromCachedEntry(entry, reference: this);
-  }
-
-  /// The locally pinned files directly under this path, read from the local
-  /// catalog without contacting the server (a partial view,
-  /// [DirectorySnapshot.fromCache] true). Optionally filtered by [mimeType]; may
-  /// be empty. Requires a configured store.
-  Future<DirectorySnapshot> offlineChildren({String? mimeType}) async {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    final timestamp = DateTime.now();
-    final snapshots = <FileSnapshot>[];
-    for (final e in await c.all()) {
-      if (_parentDir(e.path) != path) continue;
-      if (mimeType != null && e.data.mimeType != mimeType) continue;
-      snapshots.add(FileSnapshot.fromCachedEntry(e,
-          reference: _childRef(e.path), timestamp: timestamp));
-    }
-    return DirectorySnapshot.fromFiles(snapshots,
-        reference: this, timestamp: timestamp, fromCache: true);
+        reference: this, timestamp: timestamp);
   }
 
   ChildReference _childRef(String fullPath) => _withPath(fullPath);
-
-  /// The parent directory of [p] (everything before the final `/`), or `''`
-  /// when [p] has no slash.
-  String _parentDir(String p) {
-    final i = p.lastIndexOf('/');
-    return i < 0 ? '' : p.substring(0, i);
-  }
 
   /// Uploads a local file.
   ///
@@ -254,12 +234,14 @@ final class ChildReference {
   }
 
   /// Registers a one-shot task with the registry, when one is configured, so
-  /// `WincheStorage.close()` can abort it. Returns [task] for inline use.
+  /// `WincheStorage.close()` can abort it and so it stays observable on
+  /// `transferEvents` and via `uploadFor`/`downloadFor`. Returns [task] for
+  /// inline use.
   UploadTask _trackUpload(UploadTask task) =>
-      registry == null ? task : registry!.addUpload(task);
+      registry == null ? task : registry!.addUpload(path, task);
 
   DownloadTask _trackDownload(DownloadTask task) =>
-      registry == null ? task : registry!.addDownload(task);
+      registry == null ? task : registry!.addDownload(path, task);
 
   /// Uploads bytes.
   ///
@@ -298,21 +280,15 @@ final class ChildReference {
   }
 
   /// Downloads the file to [saveTo] (an absolute path; bytes written verbatim).
-  /// For a managed, offline-cached copy that needs no path, use
-  /// [makeAvailableOffline] instead.
+  /// For a managed copy that needs no path, use [keepCached] instead.
   ///
-  /// [enqueue] makes the download durable: it joins the transfer queue and
-  /// resumes after an app restart, retrying until it succeeds. Requires a
-  /// configured store, else throws `StateError`. Without it the download is a
-  /// one-shot.
-  DownloadTask download(String saveTo, {bool enqueue = false}) {
-    if (enqueue && controller == null) {
-      throw StateError('enqueue requires a durable store; configure '
-          'directoryResolver or inMemory.');
-    }
-    if (enqueue) return controller!.startDownload(this, saveTo: saveTo);
-    return _trackDownload(DownloadTask.start(reference: this, saveTo: saveTo));
-  }
+  /// One-shot, with in-session retry. Downloads are never persisted: the bytes
+  /// stay authoritative on the server, so a download interrupted by app exit
+  /// costs bandwidth to redo, never data. Progress is on the returned task's
+  /// `stateStream`, and `WincheStorage.downloadFor(path)` finds it again if the
+  /// handle is lost.
+  DownloadTask download(String saveTo) => _trackDownload(
+      DownloadTask.start(reference: this, saveTo: saveTo));
 
   /// Updates metadata on the server. Throws `StorageNotFoundException` when the
   /// file does not exist. When this file is pinned offline, its cached metadata
@@ -337,57 +313,55 @@ final class ChildReference {
     return deleted;
   }
 
-  /// Pins this file for offline use (downloads it into the id-keyed cache). When
-  /// this path is a directory, pins every file directly under it instead (one
-  /// level — nested sub-directories are not included, since the server lists a
-  /// single level). Requires a configured store. The future completes when the
-  /// download(s) finish; progress is observable on `WincheStorage.transferEvents`.
-  Future<void> makeAvailableOffline() {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    return c.pin(this);
-  }
+  /// The cached copy of this file, or null when this device has no usable
+  /// bytes. Never contacts the server, and never throws for "not cached".
+  ///
+  /// Authoritative: the bytes are verified against the file on disk, so a
+  /// returned [CachedFile] always has a `localPath` that opens. Requires a
+  /// configured store.
+  Future<CachedFile?> cachedFile() => _requireCatalog().cachedFile(path);
 
-  /// Re-downloads the current remote version into the offline cache, refreshing
-  /// the pinned copy. Requires a configured store.
-  Future<void> refreshOfflineCopy() {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    return c.refresh(this);
-  }
+  /// Caches this file's bytes for offline use, returning the existing copy when
+  /// they are already complete. Downloads only when they are not — for an
+  /// unconditional re-download use [refreshCache].
+  ///
+  /// A resumed download is guarded: if the server's content changed since the
+  /// partial was written, the partial is discarded rather than appended to.
+  ///
+  /// Throws `StorageNotFoundException` when the server has no record here, and
+  /// `StorageFailedPreconditionException` when it has a record but no bytes —
+  /// an upload in flight, or one that failed. To cache a file *you* are
+  /// uploading, use `uploadPath(..., cache: true)`, which populates the cache
+  /// from the source you already have.
+  ///
+  /// Throws `StorageUnavailableException` when the server is unreachable.
+  /// Retrying is the caller's decision: a cache fill loses nothing by being
+  /// deferred, since the bytes stay authoritative on the server.
+  ///
+  /// Caches exactly this file. To cache a directory's contents, list it and
+  /// loop — which is also the only way to bound the concurrency yourself.
+  Future<CachedFile> keepCached() => _requireCatalog().pin(this);
 
-  /// The freshness of this file's pinned offline copy: `notPinned`, `upToDate`,
-  /// `contentChanged` (re-download via [refreshOfflineCopy]), `remoteDeleted`, or
-  /// `unknown` (offline / no fingerprint). Requires a configured store.
-  Future<OfflineCopyStatus> offlineCopyStatus() {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    return c.offlineCopyStatus(path);
-  }
+  /// Re-downloads this file's current remote version, replacing the cached
+  /// bytes. Requires a configured store.
+  Future<CachedFile> refreshCache() => _requireCatalog().refresh(this);
 
-  /// Removes the local offline copy and its catalog entry. Requires a configured
+  /// Drops this file's cached bytes and its catalog row. A no-op when it is not
+  /// cached. Requires a configured store.
+  Future<void> clearCache() => _requireCatalog().evict(path);
+
+  /// Compares the cached copy against the server's current record: `upToDate`,
+  /// `contentChanged` (re-fetch via [refreshCache]), `remoteDeleted`,
+  /// `remoteIncomplete`, or `unknown` (offline).
+  ///
+  /// Round-trips to the server — unlike every other cache method here. "Not
+  /// cached" is not among the results: that is `cachedFile() == null`, which
+  /// needs no network. Requires a configured store.
+  Future<CacheStatus> checkForUpdate() => _requireCatalog().checkForUpdate(path);
+
+  /// Resumes this path's queued or paused durable upload. Requires a configured
   /// store.
-  Future<void> removeOfflineCopy() {
-    final c = catalog;
-    if (c == null) {
-      throw StateError(
-          'no offline store configured (set directoryResolver or inMemory).');
-    }
-    return c.evict(path);
-  }
-
-  /// Resumes this path's queued/paused durable transfer. Requires a configured
-  /// store.
-  Future<void> resumeTransfer() {
+  Future<void> resumeUpload() {
     final ctrl = controller;
     if (ctrl == null) {
       throw StateError(
@@ -395,4 +369,9 @@ final class ChildReference {
     }
     return ctrl.resumePath(path);
   }
+
+  OfflineCatalog _requireCatalog() =>
+      catalog ??
+      (throw StateError(
+          'no file cache configured (set directoryResolver or inMemory).'));
 }

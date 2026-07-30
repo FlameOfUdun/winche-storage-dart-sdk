@@ -3,13 +3,9 @@ import 'file_snapshot.dart';
 
 /// An immutable snapshot of a directory listing at a point in time.
 ///
-/// Returned by [ChildReference.list]. Wraps the per-file [FileSnapshot]s in
-/// [files] plus directory-level metadata.
-///
-/// [fromCache] mirrors [FileSnapshot.fromCache]: it is true only when the
-/// listing was served from the local offline catalog because the server was
-/// unreachable — in which case it is the pinned-only (partial) view of the
-/// directory, not the authoritative server listing.
+/// Returned by [ChildReference.listChildren]. Always the authoritative server
+/// listing — directory listings are never cached. Each [FileSnapshot] in
+/// [files] is annotated with whether this device holds that file's bytes.
 final class DirectorySnapshot {
   /// The directory this snapshot lists.
   final ChildReference reference;
@@ -20,16 +16,10 @@ final class DirectorySnapshot {
   /// When the snapshot was taken.
   final DateTime timestamp;
 
-  /// True when [files] came from the local offline catalog because the server
-  /// was unreachable (a partial, pinned-only view). False for an authoritative
-  /// server listing.
-  final bool fromCache;
-
   const DirectorySnapshot._({
     required this.reference,
     required this.files,
     required this.timestamp,
-    required this.fromCache,
   });
 
   /// A listing snapshot wrapping [files] for [reference].
@@ -37,13 +27,11 @@ final class DirectorySnapshot {
     List<FileSnapshot> files, {
     required ChildReference reference,
     DateTime? timestamp,
-    bool fromCache = false,
   }) =>
       DirectorySnapshot._(
         reference: reference,
         files: List.unmodifiable(files),
         timestamp: timestamp ?? DateTime.now(),
-        fromCache: fromCache,
       );
 
   /// The last path segment of [reference] (e.g. `user-123`).
