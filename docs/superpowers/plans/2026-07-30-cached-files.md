@@ -17,7 +17,7 @@ in-memory store and `NoopApi` fake for tests.
 
 **Spec:** `docs/superpowers/specs/2026-07-30-cached-files-design.md`
 
-**Before you start:** run `dart test` once and confirm 175 tests pass, so a
+**Before you start:** run `dart test` once and confirm 181 tests pass, so a
 later failure is unambiguously yours.
 
 ---
@@ -90,7 +90,7 @@ analysis does not fail on an unresolved doc reference, so this order is safe.
 - [ ] **Step 2: Run the existing suite to prove nothing changed**
 
 Run: `dart test`
-Expected: 175 tests pass, 0 failures.
+Expected: 181 tests pass, 0 failures.
 
 - [ ] **Step 3: Analyze**
 
@@ -290,7 +290,7 @@ Expected: 3 tests pass.
 - [ ] **Step 6: Run the full suite and analyzer**
 
 Run: `dart test && dart analyze`
-Expected: 178 tests pass; `No issues found!`
+Expected: 184 tests pass; `No issues found!`
 
 - [ ] **Step 7: Commit**
 
@@ -506,7 +506,7 @@ with:
 - [ ] **Step 6: Run the full suite and analyzer**
 
 Run: `dart test && dart analyze`
-Expected: 185 tests pass; `No issues found!`
+Expected: 191 tests pass; `No issues found!`
 
 - [ ] **Step 7: Commit**
 
@@ -639,7 +639,7 @@ In `pubspec.yaml`, change line 4 from `version: 5.0.0` to `version: 5.1.0`.
 - [ ] **Step 7: Verify everything**
 
 Run: `dart test && dart analyze`
-Expected: 185 tests pass; `No issues found!`
+Expected: 191 tests pass; `No issues found!`
 
 Then run: `dart pub publish --dry-run`
 Expected: the package validates. This step is a sanity check on the version
@@ -658,7 +658,7 @@ git commit -m "docs: document cachedFiles() and release 5.1.0"
 
 ## Done
 
-`cachedFiles()` on `ChildReference`, 10 new tests (185 total), the
+`cachedFiles()` on `ChildReference`, 10 new tests (191 total), the
 `CachedFile.reference` fix, and a 5.1.0 release entry. No breaking change: a
 5.0.0 consumer compiles untouched, and the reference fix only changes behaviour
 where that behaviour was a `StateError` or a silent orphan.
