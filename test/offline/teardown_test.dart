@@ -120,7 +120,6 @@ void main() {
     await signIn();
     await signOut();
 
-    expect(() => storage.child('a/b'), throwsA(isA<WincheUnboundException>()));
     expect(storage.resumeTransfers, throwsA(isA<WincheUnboundException>()));
     expect(storage.pendingTransfers, throwsA(isA<WincheUnboundException>()));
     expect(() => storage.uploadFor('a/b'),
@@ -135,8 +134,48 @@ void main() {
   test('the same entry points report unbound before the first sign-in', () {
     // Not a StateError: being signed out is recoverable, and the same facade
     // starts working the moment an identity arrives.
-    expect(() => storage.child('a/b'), throwsA(isA<WincheUnboundException>()));
     expect(storage.pendingTransfers, throwsA(isA<WincheUnboundException>()));
+  });
+
+  group('child() is lazy', () {
+    test('building a reference while unbound does not throw', () {
+      // The reason this matters: the call site is often a widget field or a
+      // `build` method, where throwing tears down the tree instead of
+      // reaching an error branch.
+      expect(() => storage.child('a/b'), returnsNormally);
+      expect(storage.child('a/b').path, 'a/b');
+      expect(storage.child('a').child('b').path, 'a/b');
+      expect(storage.child('a/b').parent?.path, 'a');
+    });
+
+    test('using an unbound reference rejects rather than throwing', () async {
+      final ref = storage.child('a/b');
+      await expectLater(
+          ref.getSnapshot(), throwsA(isA<WincheUnboundException>()));
+    });
+
+    test('a reference built while unbound works once an identity arrives',
+        () async {
+      final ref = storage.child('a/b');
+      await signIn();
+
+      // Resolves through the service, so it picks up the session it never saw
+      // at construction. Reaching the api at all is the assertion; the server
+      // is unreachable by design, so the call fails as a storage error.
+      await expectLater(ref.getSnapshot(), throwsA(isA<WincheStorageException>()));
+    });
+
+    test('a reference follows a user switch instead of pinning a session',
+        () async {
+      await signIn('user-a');
+      final ref = storage.child('a/b');
+      await signOut();
+
+      // The session it was built under is gone, so it reports unbound rather
+      // than quietly operating against a torn-down store.
+      await expectLater(
+          ref.getSnapshot(), throwsA(isA<WincheUnboundException>()));
+    });
   });
 
   test('tearing down mid-transfer raises no "database is closed"', () async {

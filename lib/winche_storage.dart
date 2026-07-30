@@ -17,6 +17,7 @@ import 'src/offline/storage_local_store.dart';
 import 'src/offline/transfer_controller.dart';
 import 'src/offline/transfer_event.dart';
 import 'src/offline/transfer_record.dart';
+import 'src/storage_binding.dart';
 import 'src/tasks/download_task.dart';
 import 'src/tasks/upload_task.dart';
 
@@ -125,6 +126,15 @@ final class WincheStorage extends WincheStorageService {
   TransferController? _controller;
   Future<String> Function()? _resolveDirectory;
   final LiveTaskRegistry _oneShots = LiveTaskRegistry();
+
+  /// Handed to every reference this service creates. Lives for the lifetime of
+  /// the service and is re-pointed as sessions come and go, which is what lets
+  /// a reference built while signed out start working once an identity
+  /// arrives.
+  late final StorageBinding _binding = StorageBinding(
+    registry: _oneShots,
+    onUse: () => _started = true,
+  );
 
   bool _started = false;
 
@@ -252,6 +262,13 @@ final class WincheStorage extends WincheStorageService {
     _catalog = catalog;
     _controller = controller;
     _resolveDirectory = resolveDirectory;
+    _binding.bind(
+      api: api,
+      catalog: catalog,
+      controller: controller,
+      directoryResolver: resolveDirectory,
+      multipartThreshold: _config.multipartThreshold,
+    );
 
     // Fire-and-forget, so its failures must be swallowed: an unopenable store
     // would otherwise surface as an unhandled async error from a hook nobody
@@ -280,6 +297,7 @@ final class WincheStorage extends WincheStorageService {
     _controller = null;
     _resolveDirectory = null;
     _started = false;
+    _binding.unbind();
 
     _oneShots.abortAll();
     await controller?.close();
@@ -310,20 +328,16 @@ final class WincheStorage extends WincheStorageService {
 
   /// Returns a [ChildReference] for [path].
   ///
-  /// Throws [WincheUnboundException] while nobody is signed in: a reference
-  /// carries the api and store it operates against, and while unbound there are
-  /// none to give it.
-  ChildReference child(String path) {
-    return ChildReference(
-      path: path,
-      api: _require(),
-      multipartThreshold: _config.multipartThreshold,
-      directoryResolver: _resolveDirectory,
-      catalog: _catalog,
-      controller: _controller,
-      registry: _oneShots,
-    );
-  }
+  /// Never throws, including while nobody is signed in. The reference resolves
+  /// its api and store when it is *used*, so building one in a widget field or
+  /// a `build` method is safe, and the operation you attempt on it is what
+  /// rejects with [WincheUnboundException].
+  ///
+  /// It also means a reference outlives a user switch correctly: it is always
+  /// about whoever is signed in at the moment you use it, never a stale
+  /// session captured when it was built.
+  ChildReference child(String path) =>
+      ChildReference.bound(path: path, binding: _binding);
 
   /// Re-drives every transfer halted by a pause — an expired token or an
   /// unreachable server.
