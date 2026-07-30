@@ -73,11 +73,19 @@ class OfflineCatalog implements UploadPinSink {
   Future<CachedFile?> cachedFile(String path) async {
     final entry = await entryFor(path);
     if (entry == null) return null;
+    return _verified(entry);
+  }
+
+  /// A [CachedFile] for [entry] when its bytes are complete on disk, else null.
+  ///
+  /// The single definition of "usable bytes", shared by [cachedFile] and
+  /// [cachedFilesIn] so the two cannot drift.
+  Future<CachedFile?> _verified(CatalogEntry entry) async {
     final file = File(entry.localPath);
     if (!await file.exists()) return null;
     if (await file.length() != entry.data.sizeBytes) return null;
     return CachedFile(
-      reference: _refFor(path),
+      reference: _refFor(entry.path),
       data: entry.data,
       localPath: entry.localPath,
       cachedAt: entry.pinnedAt,
