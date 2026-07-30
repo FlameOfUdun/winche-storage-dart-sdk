@@ -1,3 +1,5 @@
+import 'package:winche_core/winche_core.dart';
+
 import '../api/winche_storage_exception.dart';
 
 /// How the transfer controller should react to a failed attempt.
@@ -30,6 +32,11 @@ enum TransferFailureClass {
 /// to enumerate every possibility, and misclassifying a genuinely transient one
 /// as terminal would lose work.
 TransferFailureClass classifyTransferFailure(Object error) {
+  // A session superseded by a user switch, or ended by a sign-out. Checked
+  // ahead of the fallback below, which would otherwise class it as `retry` and
+  // spend the budget on a session that no longer exists — for a transfer core
+  // is already tearing down.
+  if (error is WincheSessionExpired) return TransferFailureClass.pause;
   if (error is! WincheStorageException) return TransferFailureClass.retry;
   return switch (error.status) {
     // Clears when the token is refreshed or the network returns.

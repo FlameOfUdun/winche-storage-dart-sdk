@@ -83,25 +83,19 @@ String _stableHash(String s) {
 String stagingFilePath(String directory, String refPath) =>
     p.normalize(p.join(directory, 'staging', _stableHash(refPath)));
 
-/// Namespaces must survive being used as a file-name component. Validated rather
-/// than sanitised: silently rewriting a user id would collapse two identities
-/// onto one store, which is the leak this scoping exists to prevent.
-final _namespacePattern = RegExp(r'^[A-Za-z0-9._-]+$');
-
-/// Throws [ArgumentError] unless [namespace] is safe as a directory name.
-/// Returns it unchanged so it can be used inline.
-String validateNamespace(String namespace) {
-  if (!_namespacePattern.hasMatch(namespace) ||
-      namespace == '.' ||
-      namespace == '..') {
-    throw ArgumentError.value(namespace, 'namespace',
-        'must match [A-Za-z0-9._-]+ (it is used as a directory name)');
-  }
-  return namespace;
-}
-
-/// The per-identity root under [directory]: the sembast index, the cached bytes
-/// and the staging area all live inside it, so forgetting a user is a single
-/// directory removal and a signed-out user's cache can never half-exist.
-String scopedRootPath(String directory, String namespace) =>
-    p.normalize(p.join(directory, 'winche_storage_${validateNamespace(namespace)}'));
+/// `<root>/winche/<storageKey>/storage` — this identity's storage root.
+///
+/// The sembast index, the cached bytes and the staging area all live inside
+/// it, so forgetting a user is a single directory removal and a signed-out
+/// user's cache can never half-exist.
+///
+/// The layout is stack-wide: an identity gets one directory under `winche/`,
+/// and each Winche package takes a subdirectory of its own beneath it. So
+/// deleting `<root>/winche/<storageKey>` forgets that user across every Winche
+/// package at once, rather than one delete per package.
+///
+/// [storageKey] comes from `WincheIdentity.storageKey` and needs no validation
+/// here: it is a SHA-256 digest, so it is always 32 lowercase hex characters
+/// whatever id the backend issued.
+String scopedRootPath(String directory, String storageKey) =>
+    p.normalize(p.join(directory, 'winche', storageKey, 'storage'));

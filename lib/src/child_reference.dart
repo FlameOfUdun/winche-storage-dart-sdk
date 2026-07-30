@@ -9,38 +9,101 @@ import 'offline/live_task_registry.dart';
 import 'offline/offline_catalog.dart';
 import 'offline/offline_copy_status.dart';
 import 'offline/transfer_controller.dart';
+import 'storage_binding.dart';
 import 'tasks/download_task.dart';
 import 'tasks/upload_task.dart';
 
 final class ChildReference {
   final String path;
-  final WincheStorageApi api;
-  final int multipartThreshold;
 
-  /// Resolves the default download directory, or null when none is configured.
-  /// Resolved lazily by [DownloadTask] when `saveTo` is omitted.
-  final Future<String> Function()? directoryResolver;
+  /// Set when this reference resolves through a live service, null when its
+  /// collaborators were supplied directly.
+  ///
+  /// The two forms exist for different callers. Internals and tests build a
+  /// reference over explicit collaborators and want them fixed. A reference
+  /// handed out by `WincheStorage.child()` must instead resolve at use time,
+  /// so that it can be built while signed out and still work once an identity
+  /// arrives — and so it never keeps a torn-down session alive.
+  final StorageBinding? _binding;
 
-  /// Offline catalog when `enableOfflineCache` is on, else null.
-  final OfflineCatalog? catalog;
-
-  /// Transfer controller when a durable store is configured, else null.
-  final TransferController? controller;
-
-  /// Tracks the one-shot transfers this reference starts so
-  /// `WincheStorage.close()` can abort them. Null for references built inside
-  /// the SDK, whose transfers are durable and tracked by [controller].
-  final LiveTaskRegistry? registry;
+  final WincheStorageApi? _api;
+  final int _multipartThreshold;
+  final Future<String> Function()? _directoryResolver;
+  final OfflineCatalog? _catalog;
+  final TransferController? _controller;
+  final LiveTaskRegistry? _registry;
 
   const ChildReference({
     required this.path,
-    required this.api,
-    this.multipartThreshold = 5 * 1024 * 1024,
-    this.directoryResolver,
-    this.catalog,
-    this.controller,
-    this.registry,
-  });
+    required WincheStorageApi api,
+    int multipartThreshold = 5 * 1024 * 1024,
+    Future<String> Function()? directoryResolver,
+    OfflineCatalog? catalog,
+    TransferController? controller,
+    LiveTaskRegistry? registry,
+  })  : _binding = null,
+        _api = api,
+        _multipartThreshold = multipartThreshold,
+        _directoryResolver = directoryResolver,
+        _catalog = catalog,
+        _controller = controller,
+        _registry = registry;
+
+  /// A reference that resolves its collaborators from [binding] when used.
+  const ChildReference.bound({required this.path, required StorageBinding binding})
+      : _binding = binding,
+        _api = null,
+        _multipartThreshold = 5 * 1024 * 1024,
+        _directoryResolver = null,
+        _catalog = null,
+        _controller = null,
+        _registry = null;
+
+  /// The api this reference operates against.
+  ///
+  /// For a bound reference this throws `WincheUnboundException` when nobody is
+  /// signed in — which is why building one never throws and using one can.
+  WincheStorageApi get api => _binding?.api ?? _api!;
+
+  int get multipartThreshold =>
+      _binding?.multipartThreshold ?? _multipartThreshold;
+
+  /// Resolves the default download directory, or null when none is configured.
+  /// Resolved lazily by [DownloadTask] when `saveTo` is omitted.
+  Future<String> Function()? get directoryResolver =>
+      _binding != null ? _binding.directoryResolver : _directoryResolver;
+
+  /// Offline catalog when a local store is configured, else null.
+  OfflineCatalog? get catalog =>
+      _binding != null ? _binding.catalog : _catalog;
+
+  /// Transfer controller when a durable store is configured, else null.
+  TransferController? get controller =>
+      _binding != null ? _binding.controller : _controller;
+
+  /// Tracks the one-shot transfers this reference starts so teardown can abort
+  /// them. Null for references built inside the SDK, whose transfers are
+  /// durable and tracked by [controller].
+  LiveTaskRegistry? get registry =>
+      _binding != null ? _binding.registry : _registry;
+
+  /// A reference to [fullPath] carrying this reference's configuration, in
+  /// whichever of the two forms this one uses.
+  ChildReference _withPath(String fullPath) {
+    final binding = _binding;
+    if (binding != null) {
+      return ChildReference.bound(path: fullPath, binding: binding);
+    }
+    return ChildReference(
+      path: fullPath,
+      api: _api!,
+      multipartThreshold: _multipartThreshold,
+      directoryResolver: _directoryResolver,
+      catalog: _catalog,
+      controller: _controller,
+      registry: _registry,
+    );
+  }
 
   /// The last path segment (e.g. `a.png`).
   String get name {
@@ -52,29 +115,11 @@ final class ChildReference {
   ChildReference? get parent {
     final i = path.lastIndexOf('/');
     if (i < 0) return null;
-    return ChildReference(
-      path: path.substring(0, i),
-      api: api,
-      multipartThreshold: multipartThreshold,
-      directoryResolver: directoryResolver,
-      catalog: catalog,
-      controller: controller,
-      registry: registry,
-    );
+    return _withPath(path.substring(0, i));
   }
 
   /// Returns a new [ChildReference] for a child path.
-  ChildReference child(String path) {
-    return ChildReference(
-      api: api,
-      multipartThreshold: multipartThreshold,
-      directoryResolver: directoryResolver,
-      catalog: catalog,
-      controller: controller,
-      registry: registry,
-      path: '${this.path}/$path',
-    );
-  }
+  ChildReference child(String path) => _withPath('${this.path}/$path');
 
   /// Fetches the file's metadata from the server. Server-only: it does not
   /// consult the offline cache and throws `StorageUnavailableException` when the
@@ -143,16 +188,7 @@ final class ChildReference {
         reference: this, timestamp: timestamp, fromCache: true);
   }
 
-  /// A reference to [fullPath] carrying this reference's configuration.
-  ChildReference _childRef(String fullPath) => ChildReference(
-        path: fullPath,
-        api: api,
-        multipartThreshold: multipartThreshold,
-        directoryResolver: directoryResolver,
-        catalog: catalog,
-        controller: controller,
-        registry: registry,
-      );
+  ChildReference _childRef(String fullPath) => _withPath(fullPath);
 
   /// The parent directory of [p] (everything before the final `/`), or `''`
   /// when [p] has no slash.

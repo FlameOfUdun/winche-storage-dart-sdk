@@ -3,46 +3,163 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 import 'package:file_picker/file_picker.dart';
+
+/// Stands in for a real auth package. A production app uses one that talks to
+/// its backend; all this SDK needs is an identity announced to core.
+final class DemoAuth extends WincheAuthService {
+  DemoAuth(super.app);
+
+  WincheIdentity? _identity;
+
+  @override
+  WincheIdentity? get activeIdentity => _identity;
+
+  @override
+  Future<String?> getAuthToken({bool forceRefresh = false}) async =>
+      _identity?.id;
+
+  void signIn(String id) {
+    _identity = WincheIdentity(id);
+    notifyIdentityChanged(_identity);
+  }
+
+  void signOut() {
+    _identity = null;
+    notifyIdentityChanged(null);
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  final storage = WincheStorage(
-    WincheStorageConfig(
-      uri: Uri.parse('http://localhost:5209/files'),
-      // Scopes all local state — cached files, the durable transfer queue — to
-      // one identity. A real app returns the signed-in user's id here; switching
-      // users is `await storage.close()` plus a new WincheStorage.
-      namespaceResolver: () => 'demo-user',
+  Winche.initializeApp(
+    options: WincheOptions(
+      storageEndpoint: Uri.parse('http://localhost:5209/files'),
+      // Enables both the durable transfer queue (auto-resume) and the offline
+      // cache. Every Winche package creates its state under this one root,
+      // each in a subdirectory scoped to the signed-in identity.
       directoryResolver: () async {
         final dir = await getApplicationDocumentsDirectory();
         return p.join(dir.path, 'winche_files');
       },
-      // directoryResolver's presence enables both the durable transfer queue
-      // (auto-resume) and the offline cache — no extra flags needed.
     ),
   );
 
-  runApp(_Application(storage: storage));
+  final auth = DemoAuth(Winche.app);
+  final storage = WincheStorage.instance;
+
+  // Binding is core's job: this announces an identity and core builds the
+  // session storage runs on. Switching users is another signIn — the previous
+  // identity's store is torn down first, and their queued transfers stay on
+  // disk for when they come back.
+  auth.signIn(kUsers.first);
+
+  runApp(StorageExampleApp(auth: auth, storage: storage));
 }
 
-class _Application extends StatelessWidget {
+/// The demo identities. The sample server takes the bearer token verbatim as
+/// the uid, so these are both the token and the rule subject: `alice` can only
+/// touch `userFiles/alice`.
+const kUsers = ['alice', 'bob'];
+
+class StorageExampleApp extends StatefulWidget {
+  final DemoAuth auth;
   final WincheStorage storage;
 
-  const _Application({required this.storage});
+  const StorageExampleApp({super.key, required this.auth, required this.storage});
+
+  @override
+  State<StorageExampleApp> createState() => _StorageExampleAppState();
+}
+
+class _StorageExampleAppState extends State<StorageExampleApp> {
+  String? _uid = kUsers.first;
+
+  Future<void> _switchTo(String? uid) async {
+    // Clear the uid BEFORE announcing, so no descendant rebuilds against
+    // storage that core is midway through unbinding.
+    setState(() => _uid = uid);
+    if (uid == null) {
+      widget.auth.signOut();
+    } else {
+      widget.auth.signIn(uid);
+    }
+    // Core awaits every service's hook, so this resolves only once the
+    // outgoing store is closed and the incoming one is built.
+    await Winche.app.settled;
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(home: _HomePage(storage: storage));
+    final uid = _uid;
+    return MaterialApp(
+      home: uid == null
+          ? _SignedOutPage(onSignIn: _switchTo)
+          : _HomePage(
+              // Keyed by uid so a switch rebuilds the page from scratch rather
+              // than leaving one user's listing on screen under another's name.
+              key: ValueKey(uid),
+              storage: widget.storage,
+              uid: uid,
+              onSwitchUser: _switchTo,
+            ),
+    );
+  }
+}
+
+class _SignedOutPage extends StatelessWidget {
+  final Future<void> Function(String?) onSignIn;
+
+  const _SignedOutPage({required this.onSignIn});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Winche Storage Example')),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.lock_outline, size: 48),
+            const SizedBox(height: 12),
+            const Text('Signed out'),
+            const SizedBox(height: 4),
+            const Text(
+              'Storage is unbound: there is no session to serve requests,\n'
+              'and no store open on disk.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            for (final u in kUsers)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: FilledButton(
+                  onPressed: () => onSignIn(u),
+                  child: Text('Sign in as $u'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
 class _HomePage extends StatefulWidget {
   final WincheStorage storage;
+  final String uid;
+  final Future<void> Function(String?) onSwitchUser;
 
-  const _HomePage({required this.storage});
+  const _HomePage({
+    super.key,
+    required this.storage,
+    required this.uid,
+    required this.onSwitchUser,
+  });
 
   @override
   State<_HomePage> createState() => _HomePageState();
@@ -51,7 +168,10 @@ class _HomePage extends StatefulWidget {
 class _HomePageState extends State<_HomePage>
     with SingleTickerProviderStateMixin {
   WincheStorage get storage => widget.storage;
-  ChildReference get root => storage.child("userFiles/user-123");
+
+  /// Scoped to the signed-in user, which is what the sample server's rules
+  /// enforce: `alice` is denied everything outside `userFiles/alice`.
+  ChildReference get root => storage.child('userFiles/${widget.uid}');
 
   UploadTask? currentUploadTask;
   DownloadTask? currentDownloadTask;
@@ -89,18 +209,52 @@ class _HomePageState extends State<_HomePage>
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _listing = _loadListing();
-    _cachedListing = root.offlineChildren();
+    _cachedListing = _loadCachedListing();
     _loadPending();
+
     // Observe the durable transfer queue as it drains (auto-resume).
-    _eventsSub = storage.transferEvents.listen((event) {
-      if (!mounted) return;
-      setState(() {
-        _events.insert(0, event);
-        if (_events.length > 10) _events.removeLast();
+    //
+    // Guarded because this page can be built while storage is unbound — during
+    // a sign-out, or between a switch tearing one session down and the next
+    // being built. `transferEvents` needs a session; without the guard it
+    // throws out of initState, which Flutter turns into a red screen.
+    try {
+      _eventsSub = storage.transferEvents.listen((event) {
+        if (!mounted) return;
+        setState(() {
+          _events.insert(0, event);
+          if (_events.length > 10) _events.removeLast();
+        });
+        _loadPending(); // the queue changed — refresh the snapshot
       });
-      _loadPending(); // the queue changed — refresh the snapshot
-    });
+    } on WincheUnboundException {
+      // Nobody is signed in; there is no queue to observe yet.
+    } on StateError {
+      // No local store configured, so there is no durable queue at all.
+    }
   }
+
+  /// The cache-only listing that backs the "Cached" tab.
+  ///
+  /// Guarded for the same reasons as the event subscription above:
+  /// `offlineChildren()` throws when unbound, and `StateError` when no store
+  /// is configured at all.
+  Future<DirectorySnapshot> _loadCachedListing() async {
+    try {
+      return await root.offlineChildren();
+    } on WincheUnboundException {
+      return _emptyListing();
+    } on StateError {
+      return _emptyListing();
+    }
+  }
+
+  DirectorySnapshot _emptyListing() => DirectorySnapshot.fromFiles(
+        const [],
+        reference: root,
+        timestamp: DateTime.now(),
+        fromCache: true,
+      );
 
   @override
   void dispose() {
@@ -126,6 +280,12 @@ class _HomePageState extends State<_HomePage>
       return (await root.listChildren(), cached);
     } on StorageUnavailableException {
       return (await root.offlineChildren(), cached);
+    } on WincheUnboundException {
+      // A sign-out landed while this was in flight. The page is being replaced
+      // by the signed-out view, so there is nobody left to show a listing to —
+      // and letting it escape makes it an unhandled async error rather than
+      // something a FutureBuilder could render.
+      return (_emptyListing(), cached);
     }
   }
 
@@ -397,8 +557,9 @@ class _HomePageState extends State<_HomePage>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Winche Storage Example'),
+        title: Text('Winche Storage — ${widget.uid}'),
         actions: [
+          _UserMenu(uid: widget.uid, onSwitchUser: widget.onSwitchUser),
           // Per-call upload flags + actions, consolidated into one menu.
           PopupMenuButton<String>(
             onSelected: (value) {
@@ -794,6 +955,53 @@ class _PendingTransfersPanel extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// Switches identity, or signs out.
+///
+/// `PopupMenuButton` treats a *null* selection as a cancellation and calls
+/// `onCanceled` instead of `onSelected`, so a "Sign out" item with `value:
+/// null` would silently do nothing. `(uid: null)` is a non-null record that
+/// still says "no user".
+class _UserMenu extends StatelessWidget {
+  final String uid;
+  final Future<void> Function(String?) onSwitchUser;
+
+  const _UserMenu({required this.uid, required this.onSwitchUser});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<({String? uid})>(
+      tooltip: 'Signed in as $uid',
+      icon: const Icon(Icons.person),
+      onSelected: (choice) => onSwitchUser(choice.uid),
+      itemBuilder: (context) => [
+        for (final u in kUsers)
+          PopupMenuItem<({String? uid})>(
+            value: (uid: u),
+            enabled: u != uid,
+            child: Row(
+              children: [
+                Icon(u == uid ? Icons.check : Icons.person_outline, size: 18),
+                const SizedBox(width: 8),
+                Text(u),
+              ],
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<({String? uid})>(
+          value: (uid: null),
+          child: Row(
+            children: [
+              Icon(Icons.logout, size: 18),
+              SizedBox(width: 8),
+              Text('Sign out'),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

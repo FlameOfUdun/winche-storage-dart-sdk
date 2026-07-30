@@ -509,13 +509,21 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.15.0"
+  winche_core:
+    dependency: "direct main"
+    description:
+      name: winche_core
+      sha256: "7dba42b44f105f9fb4d181a14430e667c356a65bba054564f854049f643419d1"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.0"
   winche_storage:
     dependency: "direct main"
     description:
       path: ".."
       relative: true
     source: path
-    version: "4.0.1"
+    version: "5.0.0"
   xdg_directories:
     dependency: transitive
     description:
