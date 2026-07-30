@@ -1,3 +1,5 @@
+import 'package:winche_core/winche_core.dart';
+
 /// Semantic error statuses for Winche Storage, mapped from HTTP/transport failures.
 enum StorageErrorStatus {
   notFound,
@@ -12,15 +14,19 @@ enum StorageErrorStatus {
   unknown,
 }
 
-/// Base exception for all Winche Storage errors. Mirrors the structure of
-/// `winche_database`'s `WincheException` (status + message + details), with
-/// `Storage`-scoped names so the two SDKs never collide when imported together.
-sealed class WincheStorageException implements Exception {
+/// Base exception for every failure this package's backend reports.
+///
+/// Sits one level under core's [WincheException], the root for the whole
+/// Winche stack. That is the intended shape: `on WincheException` asks "did
+/// any Winche SDK fail?", while `on WincheStorageException` asks the narrower
+/// and usually more useful "did the *storage backend* reject this?" — a
+/// question a client-side lifecycle failure like [WincheUnboundException]
+/// should not answer yes to.
+sealed class WincheStorageException extends WincheException {
   final StorageErrorStatus status;
-  final String message;
   final Map<String, Object?>? details;
 
-  const WincheStorageException(this.status, this.message, [this.details]);
+  const WincheStorageException(this.status, super.message, [this.details]);
 
   /// Returns the most specific subclass for [status].
   factory WincheStorageException.fromStatus(

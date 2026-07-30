@@ -3,27 +3,59 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 import 'package:file_picker/file_picker.dart';
+
+/// Stands in for a real auth package. A production app uses one that talks to
+/// its backend; all this SDK needs is an identity announced to core.
+final class DemoAuth extends WincheAuthService {
+  DemoAuth(super.app);
+
+  WincheIdentity? _identity;
+
+  @override
+  WincheIdentity? get activeIdentity => _identity;
+
+  @override
+  Future<String?> getAuthToken({bool forceRefresh = false}) async =>
+      _identity?.id;
+
+  void signIn(String id) {
+    _identity = WincheIdentity(id);
+    notifyIdentityChanged(_identity);
+  }
+
+  void signOut() {
+    _identity = null;
+    notifyIdentityChanged(null);
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  final storage = WincheStorage(
-    WincheStorageConfig(
-      uri: Uri.parse('http://localhost:5209/files'),
-      // Scopes all local state — cached files, the durable transfer queue — to
-      // one identity. A real app returns the signed-in user's id here; switching
-      // users is `await storage.close()` plus a new WincheStorage.
-      namespaceResolver: () => 'demo-user',
+  Winche.initializeApp(
+    options: WincheOptions(
+      storageEndpoint: Uri.parse('http://localhost:5209/files'),
+      // Enables both the durable transfer queue (auto-resume) and the offline
+      // cache. Every Winche package creates its state under this one root,
+      // each in a subdirectory scoped to the signed-in identity.
       directoryResolver: () async {
         final dir = await getApplicationDocumentsDirectory();
         return p.join(dir.path, 'winche_files');
       },
-      // directoryResolver's presence enables both the durable transfer queue
-      // (auto-resume) and the offline cache — no extra flags needed.
     ),
   );
+
+  final auth = DemoAuth(Winche.app);
+  final storage = WincheStorage.instance;
+
+  // Binding is core's job: this announces an identity and core builds the
+  // session storage runs on. Switching users is another signIn — the previous
+  // identity's store is torn down first, and their queued transfers stay on
+  // disk for when they come back.
+  auth.signIn('demo-user');
 
   runApp(_Application(storage: storage));
 }

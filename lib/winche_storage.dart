@@ -1,6 +1,10 @@
 import 'dart:async';
 
+import 'package:meta/meta.dart';
+import 'package:winche_core/winche_core.dart';
+
 import 'src/api/winche_storage_api.dart';
+import 'src/api/winche_storage_exception.dart';
 import 'src/api/winche_storage_http_api.dart';
 import 'src/child_reference.dart';
 import 'src/offline/lazy_storage_local_store.dart';
@@ -47,51 +51,27 @@ export 'src/offline/offline_copy_status.dart' show OfflineCopyStatus;
 /// identical. On web the durable store uses IndexedDB (no directory needed).
 const bool _kIsWeb = identical(0, 0.0);
 
-/// Connection and offline options for [WincheStorage].
+/// The IndexedDB database name on the web, where there is no filesystem.
+///
+/// Names the same three parts as the native path — scope, identity, package —
+/// flattened, because IndexedDB has no directories to nest in.
+@visibleForTesting
+String webDatabaseNameFor(WincheIdentity identity) =>
+    'winche_${identity.storageKey}_storage';
+
+/// Tuning for a [WincheStorage].
+///
+/// Only what storage decides for itself. The endpoint, the auth token, the
+/// identity that scopes local state, and the directory that state lives under
+/// all come from `winche_core` — see [WincheOptions] — so they cannot be set
+/// here and cannot disagree with the rest of the stack.
 final class WincheStorageConfig {
-  /// The REST base URI, e.g. `Uri.parse('https://host/files')`.
-  final Uri uri;
-
-  /// Supplies the auth token sent as `Authorization: Bearer <token>`.
-  final FutureOr<String> Function()? tokenProvider;
-
   /// Files larger than this are uploaded in multiple parts. Defaults to 5 MiB.
   final int multipartThreshold;
 
   /// Use a non-persistent in-memory index (catalog + transfer queue) instead of
-  /// sembast. Files still go to disk via [directoryResolver]. Defaults to false.
+  /// sembast. Files still go to disk. Defaults to false.
   final bool inMemory;
-
-  /// Resolves the namespace that scopes local state to one identity — return the
-  /// signed-in user's id. **Required** unless [inMemory] is true; must be null
-  /// when it is.
-  ///
-  /// Local state is single-tenant: the offline catalog, the cached bytes and the
-  /// durable transfer queue carry no identity of their own. Sharing one store
-  /// across users means the second user reads the first user's pinned files, and
-  /// the first user's queued uploads replay under the second user's token.
-  /// Requiring a namespace makes that a decision you take rather than one you
-  /// can forget.
-  ///
-  /// Each identity gets its own directory — `<dir>/winche_storage_<namespace>/`,
-  /// holding the sembast index, `cache/` and `staging/` (on the web, an
-  /// IndexedDB database of that name). A user switch is `await storage.close()`
-  /// followed by a new [WincheStorage]; the previous user's queued transfers
-  /// stay on disk and resume when they sign back in.
-  ///
-  /// Like [directoryResolver] this is resolved lazily on first store access and
-  /// **cached** — it pins the identity for the lifetime of this [WincheStorage].
-  ///
-  /// The resolved value must match `[A-Za-z0-9._-]+` (it becomes a directory
-  /// name); anything else throws [ArgumentError] when the store opens.
-  final FutureOr<String> Function()? namespaceResolver;
-
-  /// Resolves the parent directory that the identity-scoped root is created in.
-  ///
-  /// Its presence (or [inMemory], or web) enables the durable transfer queue and
-  /// offline cache. With none of those configured on native, the client is
-  /// stateless and durable/offline operations throw `StateError` at call time.
-  final Future<String> Function()? directoryResolver;
 
   /// Initial backoff before the first durable-transfer retry. Defaults to 1s.
   final Duration retryBaseDelay;
@@ -108,12 +88,8 @@ final class WincheStorageConfig {
   final Duration retryPollInterval;
 
   const WincheStorageConfig({
-    required this.uri,
-    this.tokenProvider,
     this.multipartThreshold = 5 * 1024 * 1024,
     this.inMemory = false,
-    this.namespaceResolver,
-    this.directoryResolver,
     this.retryBaseDelay = const Duration(seconds: 1),
     this.retryMaxDelay = const Duration(seconds: 30),
     this.retryMaxAttempts = 5,
@@ -122,174 +98,226 @@ final class WincheStorageConfig {
 }
 
 /// The entry point for the Winche Storage Dart SDK.
-final class WincheStorage {
-  final WincheStorageApi _api;
-  final StorageLocalStore? _store;
-  final OfflineCatalog? _catalog;
-  final TransferController? _controller;
-  final int _multipartThreshold;
+///
+/// Bound to whichever identity is signed in. `winche_core` builds a session on
+/// sign-in and tears it down on sign-out, so a user switch is not something
+/// this class exposes or an app has to sequence: the outgoing identity's store
+/// is fully closed before the incoming one opens.
+///
+/// NOTE: a persistent (sembast) store must be owned by a single isolate. Do not
+/// open the same on-disk store from multiple isolates concurrently.
+final class WincheStorage extends WincheStorageService {
+  /// Creates the storage service and registers it with [app].
+  ///
+  /// Prefer [instance]; construct directly only to attach to a non-default app.
+  WincheStorage(super.app);
+
+  /// The storage attached to the default app, building it if needed.
+  static WincheStorage get instance => instanceFor(Winche.app);
+
+  /// The storage attached to [app], building it if needed.
+  static WincheStorage instanceFor(WincheApp app) =>
+      WincheService.instanceFor(app, () => WincheStorage(app));
+
+  WincheStorageApi? _api;
+  StorageLocalStore? _store;
+  OfflineCatalog? _catalog;
+  TransferController? _controller;
+  Future<String> Function()? _resolveDirectory;
   final LiveTaskRegistry _oneShots = LiveTaskRegistry();
-  late final Future<String> Function()? _resolveDirectory;
 
-  Future<void>? _closing;
-  bool _closed = false;
+  bool _started = false;
 
-  WincheStorage._({
+  WincheStorageConfig _config = const WincheStorageConfig();
+
+  /// Tuning for the sessions this facade builds.
+  WincheStorageConfig get config => _config;
+
+  /// Throws a [StateError] once the current session has been used.
+  ///
+  /// Construction is lazy, so a session core bound synchronously during
+  /// `WincheStorage.instance` has not been used yet. That window is what lets
+  /// `instance.config = ...` work on the line after `.instance`.
+  set config(WincheStorageConfig value) {
+    if (_started) {
+      throw StateError(
+        'WincheStorage.config cannot be changed once storage has been used. '
+        'Set it immediately after first obtaining the instance.',
+      );
+    }
+    _config = value;
+  }
+
+  /// Whether a session is currently bound. For tests and the core contract
+  /// suite only.
+  @visibleForTesting
+  Object? get debugSession => _api;
+
+  @override
+  Future<void> onSessionChanged(WincheSession? session) async {
+    await _teardown();
+    if (session == null) return;
+
+    final endpoint = app.options?.storageEndpoint;
+    if (endpoint == null) {
+      throw StateError(
+        'WincheOptions.storageEndpoint is required to use winche_storage.',
+      );
+    }
+
+    final root = app.options?.directoryResolver;
+
+    // Everything for one identity lives under a single scoped root, so the
+    // catalog, the controller and sembast stay identity-unaware: they only ever
+    // see a directory. Memoized, which is what pins it for this session.
+    final resolveDirectory = root == null
+        ? null
+        : _memoize(() async =>
+            scopedRootPath(await root(), session.identity.storageKey));
+
+    // The durable queue + offline cache exist when there is somewhere to put a
+    // store: a directory (native), an in-memory index, or web (IndexedDB).
+    final needsStore = _config.inMemory || root != null || _kIsWeb;
+
+    _bind(
+      api: WincheStorageHttpApi(
+        baseUrl: endpoint.toString(),
+        tokenProvider: () async {
+          final token = await session.token();
+          if (token == null) {
+            throw const StorageUnauthenticatedException(
+              'No auth token available for the current session.',
+            );
+          }
+          return token;
+        },
+      ),
+      store: !needsStore
+          ? null
+          : (_config.inMemory
+              ? MemoryStorageLocalStore()
+              : LazyStorageLocalStore(
+                  () async => SembastStorageLocalStore.open(
+                    // No directory on the web, so the identity has to ride on
+                    // the IndexedDB database name instead.
+                    _kIsWeb ? webDatabaseNameFor(session.identity) : 'index',
+                    directory: _kIsWeb ? null : await resolveDirectory!(),
+                  ),
+                )),
+      resolveDirectory: resolveDirectory,
+    );
+  }
+
+  /// A token rotation is exactly what an `unauthenticated`-paused transfer is
+  /// waiting for, so re-drive the queue rather than leaving it to the
+  /// `retryPollInterval` backstop.
+  @override
+  Future<void> onTokenChanged() async {
+    await _controller?.resumeTransfers();
+  }
+
+  void _bind({
     required WincheStorageApi api,
     required StorageLocalStore? store,
-    required OfflineCatalog? catalog,
-    required TransferController? controller,
-    required int multipartThreshold,
     required Future<String> Function()? resolveDirectory,
-  })  : _api = api,
-        _store = store,
-        _catalog = catalog,
-        _controller = controller,
-        _multipartThreshold = multipartThreshold {
+  }) {
+    // Controller first, so the catalog can route pins through it.
+    final controller = store == null
+        ? null
+        : TransferController(
+            api: api,
+            store: store,
+            multipartThreshold: _config.multipartThreshold,
+            directoryResolver: resolveDirectory,
+            retry: TransferRetryConfig(
+              baseDelay: _config.retryBaseDelay,
+              maxDelay: _config.retryMaxDelay,
+              maxAttempts: _config.retryMaxAttempts,
+              pollInterval: _config.retryPollInterval,
+            ),
+          );
+    final catalog = store == null
+        ? null
+        : OfflineCatalog(
+            api: api,
+            store: store,
+            directoryResolver: resolveDirectory,
+            multipartThreshold: _config.multipartThreshold,
+            controller: controller,
+          );
+    if (controller != null && catalog != null) controller.pinSink = catalog;
+
+    _api = api;
+    _store = store;
+    _catalog = catalog;
+    _controller = controller;
     _resolveDirectory = resolveDirectory;
-    // Fire-and-forget, so its failures must be swallowed: an unopenable store —
-    // an unusable namespace, a directory that cannot be created — would
-    // otherwise surface as an unhandled async error from a constructor the
-    // caller never awaited. The same failure resurfaces, catchably, on the next
-    // real store access.
+
+    // Fire-and-forget, so its failures must be swallowed: an unopenable store
+    // would otherwise surface as an unhandled async error from a hook nobody
+    // awaited. The same failure resurfaces, catchably, on the next real store
+    // access.
     unawaited(controller?.rehydrate().catchError((Object _) {}));
   }
 
-  factory WincheStorage(WincheStorageConfig config) {
-    final namespace = config.namespaceResolver;
-    if (config.inMemory && namespace != null) {
-      throw ArgumentError(
-          'namespaceResolver has no effect with inMemory: true.');
-    }
-    if (!config.inMemory && namespace == null) {
-      throw ArgumentError('namespaceResolver is required for a persistent '
-          'store — return the signed-in user id, so one user cannot read or '
-          "replay another's local state. Use inMemory: true for an unscoped, "
-          'non-persistent store.');
-    }
+  /// Tears the current session down in dependency order — one-shot transfers,
+  /// then the controller, and only then the store — so nothing can read the
+  /// store after it closes.
+  ///
+  /// Never waits on the network. Durable transfers are aborted mid-flight,
+  /// their records reset to pending, and resume when this identity signs back
+  /// in. One-shot transfers, started without `enqueue:`, have nothing to resume
+  /// from and fail with [StorageCancelledException].
+  Future<void> _teardown() async {
+    final controller = _controller;
+    final store = _store;
 
-    final resolver = config.directoryResolver;
+    // Cleared first, so anything the teardown below triggers sees an unbound
+    // facade rather than half-torn-down collaborators.
+    _api = null;
+    _store = null;
+    _catalog = null;
+    _controller = null;
+    _resolveDirectory = null;
+    _started = false;
 
-    // Everything for one identity lives under a single scoped root, so the
-    // catalog, the controller and sembast can stay namespace-unaware: they only
-    // ever see a directory. Memoized like the resolvers it composes, which is
-    // what pins the identity for this instance's lifetime.
-    final resolveDirectory = resolver == null
-        ? null
-        : _memoize(() async =>
-            scopedRootPath(await resolver(), await namespace!()));
-
-    // The durable queue + offline cache exist when there's somewhere to put a
-    // store: a directory (native), an in-memory index, or web (IndexedDB).
-    final needsStore = config.inMemory || resolver != null || _kIsWeb;
-
-    final api = WincheStorageHttpApi(
-      baseUrl: config.uri.toString(),
-      tokenProvider: config.tokenProvider,
-    );
-
-    final StorageLocalStore? store = !needsStore
-        ? null
-        : (config.inMemory
-            ? MemoryStorageLocalStore()
-            : LazyStorageLocalStore(() async => SembastStorageLocalStore.open(
-                  // On the web there is no directory, so the namespace has to
-                  // ride on the IndexedDB database name instead.
-                  _kIsWeb
-                      ? 'winche_storage_${validateNamespace(await namespace!())}'
-                      : 'index',
-                  directory: _kIsWeb ? null : await resolveDirectory!(),
-                )));
-
-    return WincheStorage._build(
-      api: api,
-      store: store,
-      multipartThreshold: config.multipartThreshold,
-      resolveDirectory: resolveDirectory,
-      retry: TransferRetryConfig(
-        baseDelay: config.retryBaseDelay,
-        maxDelay: config.retryMaxDelay,
-        maxAttempts: config.retryMaxAttempts,
-        pollInterval: config.retryPollInterval,
-      ),
-    );
+    _oneShots.abortAll();
+    await controller?.close();
+    await store?.close();
   }
 
-  /// Advanced / testing: build a client over an explicit [api] and [store]. The
-  /// durable queue + offline cache are always available (the store is explicit).
-  factory WincheStorage.withStore(
-    WincheStorageApi api,
-    StorageLocalStore store, {
-    int multipartThreshold = 5 * 1024 * 1024,
-    Future<String> Function()? directoryResolver,
-    Duration retryBaseDelay = const Duration(seconds: 1),
-    Duration retryMaxDelay = const Duration(seconds: 30),
-    int retryMaxAttempts = 5,
-    Duration retryPollInterval = const Duration(seconds: 30),
-  }) {
-    final resolveDirectory =
-        directoryResolver == null ? null : _memoize(directoryResolver);
-    return WincheStorage._build(
-      api: api,
-      store: store,
-      multipartThreshold: multipartThreshold,
-      resolveDirectory: resolveDirectory,
-      retry: TransferRetryConfig(
-        baseDelay: retryBaseDelay,
-        maxDelay: retryMaxDelay,
-        maxAttempts: retryMaxAttempts,
-        pollInterval: retryPollInterval,
-      ),
-    );
+  @override
+  Future<void> dispose() async {
+    await _teardown();
+    await super.dispose();
   }
 
-  factory WincheStorage._build({
-    required WincheStorageApi api,
-    required StorageLocalStore? store,
-    required int multipartThreshold,
-    required Future<String> Function()? resolveDirectory,
-    required TransferRetryConfig retry,
-  }) {
-    // When a store is configured, the durable queue + offline cache exist.
-    // Controller first, so the catalog can route pins through it.
-    final controller = store != null
-        ? TransferController(
-            api: api,
-            store: store,
-            multipartThreshold: multipartThreshold,
-            directoryResolver: resolveDirectory,
-            retry: retry,
-          )
-        : null;
-    final catalog = store != null
-        ? OfflineCatalog(
-            api: api,
-            store: store,
-            directoryResolver: resolveDirectory,
-            multipartThreshold: multipartThreshold,
-            controller: controller,
-          )
-        : null;
-    if (controller != null && catalog != null) {
-      controller.pinSink = catalog;
-    }
-    return WincheStorage._(
-      api: api,
-      store: store,
-      catalog: catalog,
-      controller: controller,
-      multipartThreshold: multipartThreshold,
-      resolveDirectory: resolveDirectory,
-    );
+  WincheStorageApi _require() {
+    final api = _api;
+    if (api == null) throw WincheUnboundException();
+    _started = true;
+    return api;
   }
 
-  /// Returns a [ChildReference] for the given [path].
+  TransferController _requireController() {
+    _require();
+    return _controller ??
+        (throw StateError(
+          'No local store configured. Set WincheOptions.directoryResolver, or '
+          'WincheStorageConfig.inMemory, to enable the durable transfer queue.',
+        ));
+  }
+
+  /// Returns a [ChildReference] for [path].
+  ///
+  /// Throws [WincheUnboundException] while nobody is signed in: a reference
+  /// carries the api and store it operates against, and while unbound there are
+  /// none to give it.
   ChildReference child(String path) {
-    _assertOpen();
     return ChildReference(
       path: path,
-      api: _api,
-      multipartThreshold: _multipartThreshold,
+      api: _require(),
+      multipartThreshold: _config.multipartThreshold,
       directoryResolver: _resolveDirectory,
       catalog: _catalog,
       controller: _controller,
@@ -297,141 +325,63 @@ final class WincheStorage {
     );
   }
 
-  void _assertOpen() {
-    if (_closed) {
-      throw StateError('WincheStorage has been closed.');
-    }
-  }
-
   /// Re-drives every transfer halted by a pause — an expired token or an
-  /// unreachable server. **Call this after refreshing an auth token**: a paused
-  /// transfer keeps its place in the queue and its retry budget indefinitely, so
-  /// nothing is lost by waiting, but nothing moves until it is nudged (the
-  /// `retryPollInterval` backstop does so on its own within one poll).
-  /// Requires a store (directoryResolver, inMemory, or web).
-  Future<void> resumeTransfers() {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
-    }
-    return c.resumeTransfers();
-  }
+  /// unreachable server.
+  ///
+  /// A token refresh already does this on its own, so call it only for things
+  /// the SDK cannot see: the OS reporting the network is back, or the app
+  /// returning to the foreground. Nothing is lost by not calling it — a paused
+  /// transfer keeps its place in the queue and its retry budget indefinitely,
+  /// and the `retryPollInterval` backstop re-drives it within one poll.
+  Future<void> resumeTransfers() => _requireController().resumeTransfers();
 
-  /// Resumes all queued downloads. Requires a store (directoryResolver, inMemory, or web).
-  Future<void> resumeDownloads() {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
-    }
-    return c.resumeDownloads();
-  }
-
-  /// Resumes all queued uploads. Requires a store (directoryResolver, inMemory, or web).
-  Future<void> resumeUploads() {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
-    }
-    return c.resumeUploads();
-  }
-
-  /// A snapshot of the durable transfer queue — every transfer that hasn't
+  /// A snapshot of the durable transfer queue — every transfer that has not
   /// completed yet (pending, running, or failed awaiting retry), optionally
-  /// filtered by [kind] (e.g. `TransferKind.upload`).
-  /// Requires a store (directoryResolver, inMemory, or web).
-  Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
-    }
-    return c.pendingTransfers(kind: kind);
-  }
+  /// filtered by [kind].
+  Future<List<TransferRecord>> pendingTransfers({TransferKind? kind}) =>
+      _requireController().pendingTransfers(kind: kind);
 
   /// The live tracked upload handle for [path], or null when none is in flight.
-  /// Throws `StateError` when no store is configured.
-  UploadTask? uploadFor(String path) {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError('no durable store configured; cannot track transfers.');
-    }
-    return c.uploadFor(path);
-  }
+  UploadTask? uploadFor(String path) => _requireController().uploadFor(path);
 
-  /// The live tracked download handle for [path], or null when none is in flight.
-  /// Throws `StateError` when no store is configured.
-  DownloadTask? downloadFor(String path) {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError('no durable store configured; cannot track transfers.');
-    }
-    return c.downloadFor(path);
-  }
+  /// The live tracked download handle for [path], or null when none is in
+  /// flight.
+  DownloadTask? downloadFor(String path) =>
+      _requireController().downloadFor(path);
 
   /// Lifecycle events as the transfer queue drains.
-  /// Requires a store (directoryResolver, inMemory, or web).
-  Stream<TransferEvent> get transferEvents {
-    _assertOpen();
-    final c = _controller;
-    if (c == null) {
-      throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable auto-resume.');
-    }
-    return c.events;
-  }
+  Stream<TransferEvent> get transferEvents => _requireController().events;
 
   /// Evicts every pinned offline file.
-  /// Requires a store (directoryResolver, inMemory, or web).
   Future<void> clearOfflineCache() {
-    _assertOpen();
-    final c = _catalog;
-    if (c == null) {
+    _require();
+    final catalog = _catalog;
+    if (catalog == null) {
       throw StateError(
-          'No store configured; configure directoryResolver or inMemory to enable offline cache.');
+        'No local store configured. Set WincheOptions.directoryResolver, or '
+        'WincheStorageConfig.inMemory, to enable the offline cache.',
+      );
     }
-    return c.clear();
+    return catalog.clear();
   }
 
-  /// Whether [close] has been called.
-  bool get isClosed => _closed;
-
-  /// Aborts in-flight transfers and closes the local store.
+  /// Binds a session over an explicitly supplied [api] and [store], bypassing
+  /// the ones that would be derived from the signed-in identity.
   ///
-  /// Tears down in dependency order — one-shot transfers, then the transfer
-  /// controller, and only then the store — so nothing can read the store after
-  /// it is closed. Idempotent, and the returned future completes only once the
-  /// store is really closed: await it before opening another [WincheStorage]
-  /// over the same files, which is what switching users does.
-  ///
-  /// Never waits on the network. Durable transfers are aborted mid-flight, their
-  /// records reset to pending, and resume in the next session. One-shot
-  /// transfers — started without `enqueue:` — have nothing to resume from and
-  /// fail with [StorageCancelledException].
-  Future<void> close() => _closing ??= _close();
-
-  Future<void> _close() async {
-    // Set first: every guarded entry point is gated on it, so anything the
-    // teardown below triggers becomes a no-op.
-    _closed = true;
-
-    // 1. One-shot transfers — settled while the store is still open.
-    _oneShots.abortAll();
-
-    // 2. The controller: cancels its timers, aborts managed transfers, and
-    //    rewrites `running` records to `pending`. All of that needs the store.
-    await _controller?.close();
-
-    // 3. Store last: nothing above can touch it any more.
-    await _store?.close();
+  /// For tests that drive fakes directly. Production code binds through
+  /// [onSessionChanged].
+  @visibleForTesting
+  void debugBindStore(
+    WincheStorageApi api,
+    StorageLocalStore store, {
+    Future<String> Function()? directoryResolver,
+  }) {
+    _bind(
+      api: api,
+      store: store,
+      resolveDirectory:
+          directoryResolver == null ? null : _memoize(directoryResolver),
+    );
   }
 
   static Future<String> Function() _memoize(Future<String> Function() f) {

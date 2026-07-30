@@ -1,8 +1,10 @@
 import 'dart:io';
 
 import 'package:test/test.dart';
-import 'package:winche_storage/winche_storage.dart';
+import 'package:winche_core/testing.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/src/offline/local_paths.dart';
+import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
 
@@ -12,56 +14,71 @@ class _ThrowingGetFileApi extends NoopApi {
 }
 
 void main() {
-  test('defaults off: child works with no store, resume throws', () {
-    final s = WincheStorage(WincheStorageConfig(
-      uri: Uri.parse('https://x/f'),
-      namespaceResolver: () => 'user-1',
-    ));
-    final ref = s.child('a/b');
-    expect(ref.path, 'a/b');
-    expect(s.resumeDownloads, throwsStateError);
-    expect(s.resumeUploads, throwsStateError);
-    expect(() => s.pendingTransfers(), throwsStateError);
-  });
-
-  test('pendingTransfers returns the queue when auto-resume is on', () async {
-    final s = WincheStorage.withStore(
-      NoopApi(),
-      MemoryStorageLocalStore(),
+  test('with no directory and no inMemory, references work but the queue does '
+      'not exist', () async {
+    // The stateless configuration: no directoryResolver on the app, inMemory
+    // off. The REST surface still works; anything durable throws, and says
+    // which of the two knobs turns it on.
+    final app = WincheApp(
+      'stateless',
+      options: WincheOptions(storageEndpoint: Uri.parse('https://x/f')),
     );
-    expect(await s.pendingTransfers(), isEmpty);
-    await s.close();
+    addTearDown(app.dispose);
+    final auth = ScriptedAuthService(app);
+    final storage = WincheStorage(app);
+
+    auth.announce(WincheIdentity('user-1'));
+    await app.settled;
+
+    expect(storage.child('a/b').path, 'a/b');
+    expect(storage.resumeTransfers, throwsStateError);
+    expect(storage.pendingTransfers, throwsStateError);
   });
 
-  test('inMemory auto-resume needs no directory and wires resume', () async {
-    final s = WincheStorage(WincheStorageConfig(
-      uri: Uri.parse('https://x/f'),
-      inMemory: true,
-    ));
-    await s.resumeDownloads();
-    await s.resumeUploads();
-    expect(s.transferEvents, isA<Stream<TransferEvent>>());
-    await s.close();
+  test('inMemory needs no directory and wires the queue', () async {
+    final app = WincheApp(
+      'in-memory',
+      options: WincheOptions(storageEndpoint: Uri.parse('https://x/f')),
+    );
+    addTearDown(app.dispose);
+    final auth = ScriptedAuthService(app);
+    final storage = WincheStorage(app)
+      ..config = const WincheStorageConfig(inMemory: true);
+
+    auth.announce(WincheIdentity('user-1'));
+    await app.settled;
+
+    await storage.resumeTransfers();
+    expect(await storage.pendingTransfers(), isEmpty);
+    expect(storage.transferEvents, isA<Stream<TransferEvent>>());
   });
 
-  test('facade: enqueue+cache uploadPath stages through the controller',
-      () async {
+  test('enqueue+cache uploadPath stages through the controller', () async {
     final tmp = Directory.systemTemp.createTempSync('winche-facade-pin');
-    addTearDown(() => tmp.deleteSync(recursive: true));
+    addTearDown(() {
+      try {
+        tmp.deleteSync(recursive: true);
+      } catch (_) {
+        // Best effort: the store may still hold a handle on Windows.
+      }
+    });
 
-    final storage = WincheStorage.withStore(
+    final app = WincheApp('facade-pin');
+    addTearDown(app.dispose);
+    final storage = WincheStorage(app)
+      ..config = const WincheStorageConfig(
+        retryMaxAttempts: 0,
+        retryPollInterval: Duration(hours: 1),
+      );
+    storage.debugBindStore(
       _ThrowingGetFileApi(), // getFile throws -> upload fails after staging
       MemoryStorageLocalStore(),
       directoryResolver: () async => tmp.path,
-      retryMaxAttempts: 0,
-      retryPollInterval: const Duration(hours: 1),
     );
-    addTearDown(storage.close);
 
     final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
-    final task = storage
-        .child('a/b.png')
-        .uploadPath(src.path, enqueue: true, cache: true);
+    final task =
+        storage.child('a/b.png').uploadPath(src.path, enqueue: true, cache: true);
     await task.whenDone.catchError((_) => null);
 
     expect(File(stagingFilePath(tmp.path, 'a/b.png')).existsSync(), isTrue);
