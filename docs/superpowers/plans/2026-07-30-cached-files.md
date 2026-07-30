@@ -964,9 +964,172 @@ git commit -m "docs: document cachedFiles() and release 5.1.0"
 
 ---
 
+## Task 6: Correct what the final review found overstated
+
+Documentation, plus three tests for claims that had none. No behaviour change.
+
+**Files:**
+- Modify: `lib/src/offline/cached_file.dart`
+- Modify: `lib/winche_storage.dart`
+- Modify: `lib/src/offline/offline_catalog.dart`
+- Modify: `CHANGELOG.md`
+- Modify: `test/offline/cached_files_test.dart`
+
+- [ ] **Step 1: Tell the truth about `CachedFile.reference`**
+
+`CachedFile` has four producers and they do not agree. `_doDownload` returns
+`CachedFile(reference: ref, …)` — the *caller's* reference, queue and all
+(`offline_catalog.dart:226`). `_verifiedFile` returns one built by `_refFor`,
+which has no queue. So `refreshCache()` and `keepCached()`-on-a-miss hand back
+a fully wired reference, while `cachedFile()`, `cachedFiles()` and
+`keepCached()`-on-a-hit do not. The current doc states the second case
+unconditionally.
+
+In `lib/src/offline/cached_file.dart`, replace the `reference` field's doc:
+
+```dart
+  /// A reference to this file, always wired for cache operations —
+  /// `clearCache()`, `refreshCache()` and `checkForUpdate()` work on it, and
+  /// `delete()` evicts the local copy along with the remote one.
+  ///
+  /// Whether it also carries the upload queue depends on where this
+  /// [CachedFile] came from. From a *download* — `refreshCache()`, or
+  /// `keepCached()` when the bytes were not already present — it is the
+  /// reference you called, queue included. From a *cache read* —
+  /// `cachedFile()`, `cachedFiles()`, or `keepCached()` when the bytes were
+  /// already complete — it is one the catalog built, which has none: there
+  /// `resumeUpload()` throws, and `delete()` will not cancel a queued upload
+  /// for this path.
+  ///
+  /// The split is invisible from the outside, so use `storage.child(path)`
+  /// when you need the queue and cannot tell which you are holding.
+  final ChildReference reference;
+```
+
+- [ ] **Step 2: Retract the "no enumeration API" claim on the facade**
+
+`lib/winche_storage.dart` still tells a reader there is no enumeration API.
+This branch added one. Replace `clearCache()`'s doc comment with:
+
+```dart
+  /// Deletes every cached file for the signed-in identity.
+  ///
+  /// The only bulk *mutation*: caching is per file and there is no automatic
+  /// eviction, so nothing else removes bytes wholesale. To see what is cached
+  /// under a directory rather than remove it, use
+  /// [ChildReference.cachedFiles]. Everything on disk is there because the
+  /// application named that file.
+```
+
+- [ ] **Step 3: Repoint three dartdoc references at methods that exist**
+
+`syncMetadata`'s doc in `lib/src/offline/offline_catalog.dart` still points at
+`[offlineSnapshot]`, `[offlineChildren]` and `[offlineCopyStatus]`, all removed
+in 5.0.0. Replace its doc comment with:
+
+```dart
+  /// Updates a cached file's metadata after a successful server write, so a
+  /// later [cachedFile] or [cachedFilesIn] reports the current metadata. Only
+  /// the metadata is touched — the content fingerprint (and every byte-identity
+  /// field) is preserved, so [checkForUpdate] still correctly flags stale
+  /// cached *bytes* even if the server content changed too. No-op when not cached.
+```
+
+- [ ] **Step 4: Qualify the CHANGELOG's account of the fix**
+
+In `CHANGELOG.md`, replace the whole `### Fixed: cache operations on
+`CachedFile.reference`` section (heading included) with:
+
+```markdown
+### Fixed: cache operations on a `CachedFile` read from the cache
+
+The reference carried by a `CachedFile` that was *read* from the cache —
+`cachedFile()`, `cachedFiles()`, or `keepCached()` when the bytes were already
+complete — was built without the catalog. So `clearCache()`, `refreshCache()`,
+`keepCached()`, `cachedFile()` and `checkForUpdate()` all threw `StateError` on
+an object obtained from the cache, and `delete()` through one deleted the file
+on the server and then silently skipped its local cleanup, leaving the bytes
+and the catalog row behind as an orphan that still reported as cached. A
+`CachedFile` returned by a download carries the reference you called it on and
+was never affected.
+
+It now carries the catalog, and the live-task registry with it: a transfer
+started through such a reference is aborted on sign-out, appears on
+`transferEvents`, and is findable via `downloadFor` / `uploadFor`.
+`uploadPath(..., cache: true)` through one now works too, where it previously
+threw `StateError`.
+
+It still carries no upload queue, so `resumeUpload()` throws on it and
+`delete()` will not cancel a queued upload for that path — use
+`storage.child(path)` when either matters.
+
+**Behaviour change:** `delete()` through a cache-read reference now evicts the
+local copy, where before it left the bytes behind. If you were relying on that,
+copy the bytes out before deleting — every route to `delete()` now cleans up.
+```
+
+- [ ] **Step 5: Test three documented claims that had none**
+
+Append inside `main()` in `test/offline/cached_files_test.dart`:
+
+```dart
+  test('does not confuse a directory with a longer one sharing its name',
+      () async {
+    // The doc names this case by example: `u1` must not pick up `u10`'s files.
+    // Exact parent matching gives it; a startsWith would not.
+    final (cat, ref) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    await seed(cat, 'u10/b.png', id: 'b');
+
+    expect((await ref.cachedFiles()).map((f) => f.path), ['u1/a.png']);
+  });
+
+  test('finds nothing for a reference built with a trailing slash', () async {
+    // Nothing normalizes the path a reference carries, so `u1/` is a directory
+    // no row has as its parent. Documented rather than smoothed over — this
+    // pins that the documented answer is the actual one.
+    final (cat, ref) = fixture(path: 'u1/');
+    await seed(cat, 'u1/a.png', id: 'a');
+
+    expect(await ref.cachedFiles(), isEmpty);
+  });
+
+  test('a reference from cachedFile can drop its own copy too', () async {
+    // The same guarantee as the cachedFiles() case, through the other producer.
+    // Both build their reference in _verifiedFile, so this is structurally
+    // covered — asserted rather than inferred, since the CHANGELOG claims it.
+    final (cat, dir) = fixture();
+    await seed(cat, 'u1/a.png', id: 'a');
+    final file = await dir.child('a.png').cachedFile();
+
+    await file!.reference.clearCache();
+
+    expect(await dir.cachedFiles(), isEmpty);
+  });
+```
+
+- [ ] **Step 6: Verify**
+
+Run: `dart test && dart analyze`
+Expected: 196 tests pass; `No issues found!`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add lib/src/offline/cached_file.dart lib/winche_storage.dart lib/src/offline/offline_catalog.dart CHANGELOG.md test/offline/cached_files_test.dart
+git commit -m "docs: correct what CachedFile.reference actually guarantees
+
+A CachedFile from a download carries the caller's reference, queue and
+all; only one read from the cache carries the catalog-built one. The
+field documented the second as though it were both. Also retracts the
+facade's no-enumeration-API claim, which this release invalidated."
+```
+
+---
+
 ## Done
 
-`cachedFiles()` on `ChildReference`, 12 new tests (193 total), the
+`cachedFiles()` on `ChildReference`, 15 new tests (196 total), the
 `CachedFile.reference` fix, and a 5.1.0 release entry. No breaking change: a
 5.0.0 consumer compiles untouched, and the reference fix only changes behaviour
 where that behaviour was a `StateError` or a silent orphan.
