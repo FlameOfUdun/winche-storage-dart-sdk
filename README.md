@@ -171,16 +171,27 @@ requests or hold a store. Operations throw `WincheUnboundException` — from
 `winche_core`, and imported from there, since it is a condition every Winche
 package shares.
 
-`storage.child(path)` is the exception: it never throws. A reference resolves
-its api and store when it is *used*, so building one is always safe — including
-in a widget field or a `build` method, where a throw would tear down the tree
-instead of reaching an error branch. The operation you attempt on it is what
-rejects.
+`storage.child(path)` and `storage.transferEvents` are the exceptions: they never
+throw. A reference resolves its api and store when it is *used*, so building one
+is always safe — including in a widget field or a `build` method, where a throw
+would tear down the tree instead of reaching an error branch. The operation you
+attempt on it is what rejects.
 
 That also means a reference is always about whoever is signed in at the moment
 you use it. One built before sign-in starts working when an identity arrives;
 one built under a previous user reports unbound after they sign out, rather than
 quietly reading a torn-down store.
+
+`transferEvents` is safe for the same reason read the other way round: observing
+whether transfers are happening is not using the session. The stream is owned by
+the facade rather than by a session, so it outlives every sign-out — attach a
+listener once, wherever is convenient, and it reports every transfer for the life
+of the app. There is nothing to re-attach on a user switch.
+
+Obtaining the facade is likewise safe at any time, and does not put you in a
+window where it is momentarily unusable: when an identity is already signed in,
+`WincheStorage.instance` returns bound. Registering it up front in `main()` is
+optional, not a precaution.
 
 `WincheUnboundException` is **not** a `WincheStorageException` — it never
 crossed the wire, and being signed out is fixed by signing in rather than by
@@ -616,17 +627,18 @@ has been used throws a `StateError`.
 ### `WincheStorage`
 
 Every member below throws `WincheUnboundException` while nobody is signed in,
-except `child()`, which is safe to call at any time. Members needing a local
-store additionally throw `StateError` when none is configured.
+except `child()` and `transferEvents`, which are safe to call at any time.
+Members needing a local store additionally throw `StateError` when none is
+configured.
 
 | Member | Description |
 | --- | --- |
-| `WincheStorage.instance` | The storage attached to the default app, building it if needed. Use `instanceFor(app)` for a named app. |
+| `WincheStorage.instance` | The storage attached to the default app, building it if needed. Returns bound when an identity is already signed in. Use `instanceFor(app)` for a named app. |
 | `config` | `WincheStorageConfig`. Settable until storage is first used, `StateError` after. |
 | `child(path)` | Returns a `ChildReference`. Never throws: the reference resolves its api and store when used. |
 | `resumeUploads()` | Re-drives every upload halted by a pause (expired token, unreachable server). Automatic on sign-in and on a token refresh — call it only for what the SDK cannot see, such as the OS reporting the network is back. |
 | `pendingUploads()` | Snapshot of the durable outbox (pending/running/paused/failed `TransferRecord`s). Uploads only — downloads are not persisted. |
-| `transferEvents` | `Stream<TransferEvent>` covering every transfer: durable uploads as the queue drains, and one-shot uploads and downloads as they run. |
+| `transferEvents` | `Stream<TransferEvent>` covering every transfer: durable uploads as the queue drains, and one-shot uploads and downloads as they run. Never throws, and outlives every session — attach once. |
 | `uploadFor(path)` | The live upload handle for `path` (or `null`). Survives a restart — a durable upload is rehydrated from its record. |
 | `downloadFor(path)` | The live download handle for `path` (or `null`). In-session only: a download that did not survive the process is not running. |
 | `clearCache()` | Deletes every cached file for the signed-in identity. |

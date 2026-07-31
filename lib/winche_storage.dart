@@ -181,9 +181,14 @@ final class WincheStorage extends WincheStorageService {
   @visibleForTesting
   OfflineCatalog? get debugCatalog => _catalog;
 
+  /// Whether anything is bound that [_teardown] would have to close.
+  bool get _isBound => _api != null || _controllerEvents != null;
+
   @override
   Future<void> onSessionChanged(WincheSession? session) async {
-    await _teardown();
+    // Skipped when there is nothing to tear down: the await would suspend
+    // before [_bind], leaving a facade registered mid-frame unbound for it.
+    if (_isBound) await _teardown();
     if (session == null) return;
 
     final endpoint = app.options?.storageEndpoint;
@@ -400,10 +405,10 @@ final class WincheStorage extends WincheStorageService {
 
   /// Lifecycle events for every transfer — durable uploads as the queue drains,
   /// and one-shot uploads and downloads as they run.
-  Stream<TransferEvent> get transferEvents {
-    _require();
-    return _events.stream;
-  }
+  ///
+  /// An observation, not a use: never throws while unbound, and never locks
+  /// [config].
+  Stream<TransferEvent> get transferEvents => _events.stream;
 
   /// Deletes every cached file for the signed-in identity.
   ///

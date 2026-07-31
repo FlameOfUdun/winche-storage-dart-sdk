@@ -126,8 +126,6 @@ void main() {
         throwsA(isA<WincheUnboundException>()));
     expect(() => storage.downloadFor('a/b'),
         throwsA(isA<WincheUnboundException>()));
-    expect(() => storage.transferEvents,
-        throwsA(isA<WincheUnboundException>()));
     expect(storage.clearCache, throwsA(isA<WincheUnboundException>()));
   });
 
@@ -135,6 +133,73 @@ void main() {
     // Not a StateError: being signed out is recoverable, and the same facade
     // starts working the moment an identity arrives.
     expect(storage.pendingUploads, throwsA(isA<WincheUnboundException>()));
+  });
+
+  group('transferEvents is an observation, not a use', () {
+    // The reason this matters is the same one child() is lazy for: the call
+    // site is typically a `build` method, where throwing tears down the tree
+    // instead of reaching an error branch.
+    test('never throws, bound or not', () async {
+      expect(() => storage.transferEvents, returnsNormally);
+
+      await signIn();
+      expect(() => storage.transferEvents, returnsNormally);
+
+      await signOut();
+      expect(() => storage.transferEvents, returnsNormally);
+    });
+
+    test('reading it does not count as using the facade', () {
+      storage.transferEvents;
+
+      // Still settable: observing whether transfers are happening must not
+      // lock the tuning the next session is built from.
+      expect(
+        () => storage.config = const WincheStorageConfig(inMemory: true),
+        returnsNormally,
+      );
+    });
+
+    test('one subscription spans every session', () async {
+      // Attached before anyone signs in, and never re-attached: the controller
+      // belongs to the facade rather than to a session. Each `_until` is the
+      // assertion -- it fails the test if the events never arrive.
+      final events = <TransferEvent>[];
+      final subscription = storage.transferEvents.listen(events.add);
+      addTearDown(subscription.cancel);
+
+      final src = File(p.join(tmp.path, 's.txt'))..writeAsBytesSync([1, 2, 3]);
+
+      await signIn('first');
+      storage
+          .child('a/b.txt')
+          .uploadPath(src.path, enqueue: true)
+          .whenDone
+          .ignore();
+      await _until(() async => events.any((e) => e.path == 'a/b.txt'));
+
+      await signOut();
+      await signIn('second');
+      storage
+          .child('c/d.txt')
+          .uploadPath(src.path, enqueue: true)
+          .whenDone
+          .ignore();
+      await _until(() async => events.any((e) => e.path == 'c/d.txt'));
+    });
+  });
+
+  test('a facade registered mid-session is bound at construction', () async {
+    await signIn();
+    await storage.dispose(); // free the slot; one per runtime type per app
+
+    // Registration schedules the catch-up dispatch synchronously, and a fresh
+    // facade has nothing to tear down -- so the bind lands before the
+    // constructor returns rather than a microtask later. Otherwise a facade
+    // first obtained inside a widget build is unbound for that whole frame,
+    // however long an identity has been signed in.
+    final fresh = WincheStorage(app);
+    expect(fresh.debugSession, isNotNull);
   });
 
   group('child() is lazy', () {

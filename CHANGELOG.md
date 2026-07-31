@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## 5.1.1
+
+### Fixed: a facade registered while signed in was unbound for that turn
+
+`onSessionChanged` opened with an unconditional `await _teardown()`. A freshly
+registered facade has nothing to tear down, but the `await` suspends anyway — an
+`async` body runs synchronously only up to its first one, and awaiting an
+already-completed future still costs a microtask. So `_bind` was never reached
+before control returned to the caller, and `WincheStorage.instance` handed back
+an unbound facade even when an identity had been signed in for minutes.
+
+Every session-bound call made in that turn threw `WincheUnboundException` — and
+because storage is usually first obtained from whatever widget needs it, that
+turn is typically a `build`, where the throw tears down the widget tree rather
+than reaching an error branch. It was also a permanent failure in practice: a
+provider or notifier that caches its creation error never retries, so the state
+did not recover on the next frame when the bind landed.
+
+The teardown is now skipped when nothing is bound, so the first bind completes
+synchronously — which is what the `config` setter already documented ("a session
+core bound synchronously during `WincheStorage.instance`"), and what
+`winche_database` has always done by guarding the same await in its `_bind`.
+
+Registration order still does not matter, and a real user switch is unaffected:
+anything bound is still fully torn down before the incoming session is built.
+
+### Fixed: `transferEvents` threw instead of returning a stream
+
+It went through `_require()`, so reading it while unbound threw rather than
+returning a stream — at a call site that is typically inside `build()`, which is
+exactly the shape core's `WincheUnboundException` documentation says a
+stream-returning member must not take. It also marked the facade as used,
+locking `config`, for what is only an observation.
+
+It is now a plain getter over the facade-owned controller, matching
+`winche_database`'s treatment of `connectionStates` and `syncEvents`. The
+controller outlives every session, so a listener attached while nobody is signed
+in keeps working and starts receiving events once an identity arrives — there is
+nothing to re-attach on a user switch.
+
+`child()` and `transferEvents` are now the two members safe to call at any time.
+
 ## 5.1.0
 
 ### Added: `ChildReference.cachedFiles()`
