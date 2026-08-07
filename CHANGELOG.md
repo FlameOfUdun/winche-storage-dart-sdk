@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## 5.1.2
+
+### Fixed: a `cache: true` upload's `whenDone` reported the file as not cached
+
+The snapshot an upload settles with was built straight from the server record —
+`FileSnapshot.fromData(record, reference: reference)` — which defaults
+`isCached` to false and `localPath` to null. Those defaults are right for a bare
+server read, and wrong here: a `cache: true` upload commits its copy *before*
+`whenDone` resolves, so the one snapshot that could speak with certainty about
+this device was the one that said nothing.
+
+The effect was a completed cached upload reporting `isCached == false` and
+`localPath == null` while the bytes sat committed in the cache directory. Code
+that trusted the snapshot re-fetched, re-cached, or hid the offline badge; only
+a follow-up `getSnapshot()` or `cachedFile()` — an extra read, and in the first
+case an extra round trip — told the truth.
+
+`finalizePin` (and `UploadPinSink.finalizeUploadPin`) now return the path the
+bytes landed at, and the task carries it onto the snapshot. Taking it from the
+commit rather than re-reading the catalog is what makes it right for a resumed
+durable upload too, whose rehydrated reference holds no catalog to read.
+
+A deferred pin — staging failed, so no bytes are on this device — still reports
+`isCached == false` with a null `localPath`, which is the honest answer: the
+catalog row is `stale` and a later `keepCached()` fills it in. Unpinned uploads
+are unchanged.
+
+### Fixed: `updateMetadata` reported a cached file as not cached
+
+The same omission, one method over: `updateMetadata` returned
+`FileSnapshot.fromData(updatedData, reference: this)`, so editing a cached
+file's metadata handed back a snapshot claiming this device held nothing — even
+though the line above had just updated that file's catalog row. `getSnapshot`
+and `listChildren` annotate; the one write that touches the cache did not, which
+made "does this snapshot know about my device" depend on which call produced it.
+
+It now annotates from the row `syncMetadata` writes, which returns it rather
+than discarding it — so this costs no extra read. A row that is not `ready`
+reports uncached, matching `getSnapshot`.
+
 ## 5.1.1
 
 ### Fixed: a facade registered while signed in was unbound for that turn

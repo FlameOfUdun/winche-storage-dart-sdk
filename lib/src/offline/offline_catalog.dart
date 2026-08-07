@@ -261,10 +261,17 @@ class OfflineCatalog implements UploadPinSink {
   /// the metadata is touched — the content fingerprint (and every byte-identity
   /// field) is preserved, so [checkForUpdate] still correctly flags stale
   /// cached *bytes* even if the server content changed too. No-op when not cached.
-  Future<void> syncMetadata(String path, Map<String, dynamic> metadata) async {
+  ///
+  /// Returns the updated row, or null when nothing is cached here — which is
+  /// what lets the caller annotate its snapshot without a second read.
+  Future<CatalogEntry?> syncMetadata(
+      String path, Map<String, dynamic> metadata) async {
     final entry = await entryFor(path);
-    if (entry == null) return;
-    await _put(entry.copyWith(data: entry.data.copyWith(metadata: metadata)));
+    if (entry == null) return null;
+    final updated =
+        entry.copyWith(data: entry.data.copyWith(metadata: metadata));
+    await _put(updated);
+    return updated;
   }
 
   /// Removes the local file (best-effort) and the catalog entry.
@@ -364,7 +371,7 @@ class OfflineCatalog implements UploadPinSink {
   }
 
   @override
-  Future<void> finalizeUploadPin(String path, FileData confirmed) =>
+  Future<String?> finalizeUploadPin(String path, FileData confirmed) =>
       finalizePin(_refFor(path), confirmed);
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -373,7 +380,11 @@ class OfflineCatalog implements UploadPinSink {
   /// and records a `ready` entry. Idempotent — if the final file already exists
   /// it just (re)writes the entry. Falls back to a `stale` entry (a later
   /// [refresh] fills it in) when neither a staged nor a final file is present.
-  Future<void> finalizePin(ChildReference ref, FileData confirmed) async {
+  ///
+  /// Returns the path the cached bytes now live at, or null when it deferred —
+  /// which is what lets the upload's own snapshot report this device's cache
+  /// state without a second read.
+  Future<String?> finalizePin(ChildReference ref, FileData confirmed) async {
     final dir = await _requireDir();
     final staging = stagingFilePath(dir, ref.path);
     final finalPath = await _cachePath(dir, confirmed, ref.name);
@@ -385,7 +396,7 @@ class OfflineCatalog implements UploadPinSink {
       await stagedFile.rename(finalPath);
     } else if (!await finalFile.exists()) {
       await markPinDeferred(ref, confirmed);
-      return;
+      return null;
     }
 
     await _put(CatalogEntry(
@@ -394,6 +405,7 @@ class OfflineCatalog implements UploadPinSink {
       pinnedAt: DateTime.now(),
       status: CatalogStatus.ready,
     ));
+    return finalPath;
   }
 
   /// Records a `stale` entry for a cached copy that could not be populated from the

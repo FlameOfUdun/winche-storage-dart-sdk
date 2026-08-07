@@ -76,7 +76,7 @@ void main() {
     final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
     final ref = ChildReference(path: 'a/b.png', api: api);
 
-    await ctrl
+    final snap = await ctrl
         .startUpload(ref,
             localPath: src.path,
             mimeType: 'image/png',
@@ -88,6 +88,9 @@ void main() {
     final entry = await catalog.entryFor('a/b.png');
     expect(entry!.status, CatalogStatus.ready);
     expect(File(entry.localPath).readAsBytesSync(), [1, 2, 3]);
+    // ...and the snapshot the caller awaits says so.
+    expect(snap!.isCached, isTrue);
+    expect(snap.localPath, entry.localPath);
     await ctrl.close();
   });
 }

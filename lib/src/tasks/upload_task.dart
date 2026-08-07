@@ -46,11 +46,16 @@ abstract class UploadTask {
   final Duration retryBaseDelay;
   final Dio _httpClient;
   final Future<String> Function()? _stageSource;
-  final Future<void> Function(FileData confirmed)? _onPinFinalize;
+  final Future<String?> Function(FileData confirmed)? _onPinFinalize;
   final Future<void> Function(FileData confirmed)? _onPinDeferred;
 
   /// Set once a stage succeeds; guards against re-staging on pause/resume.
   String? _stagedPath;
+
+  /// Where the cached copy landed, set by [_settlePin] when the pin committed.
+  /// Null for an unpinned upload and for one whose copy was deferred — in both
+  /// cases this device holds no bytes for the file.
+  String? _pinnedPath;
 
   final _stateController = StreamController<UploadTaskState>.broadcast();
   final _taskCompleter = Completer<FileSnapshot?>();
@@ -60,6 +65,13 @@ abstract class UploadTask {
 
   UploadTaskState get state => _state;
   Stream<UploadTaskState> get stateStream => _stateController.stream;
+  /// The confirmed server record once the upload lands, or null if it was
+  /// cancelled. Errors on permanent failure.
+  ///
+  /// For a `cache: true` upload the snapshot also carries the copy this upload
+  /// committed on this device (`isCached` / `localPath`) — a caller never has
+  /// to read it back. Both stay unset when the copy was deferred, since no
+  /// bytes landed here.
   Future<FileSnapshot?> get whenDone => _taskCompleter.future;
 
   UploadTask._({
@@ -74,7 +86,7 @@ abstract class UploadTask {
     required Dio httpClient,
     required UploadTaskStatus initialStatus,
     Future<String> Function()? stageSource,
-    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<String?> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   })  : _httpClient = httpClient,
         _stageSource = stageSource,
@@ -97,7 +109,7 @@ abstract class UploadTask {
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
     Future<String> Function()? stageSource,
-    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<String?> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
     final client = httpClient ??
@@ -138,7 +150,7 @@ abstract class UploadTask {
     Duration retryBaseDelay = const Duration(seconds: 1),
     Dio? httpClient,
     Future<String> Function()? stageSource,
-    Future<void> Function(FileData confirmed)? onPinFinalize,
+    Future<String?> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
     final client = httpClient ??
@@ -455,12 +467,16 @@ abstract class UploadTask {
   /// staging was lost). Runs *before* the task completes, so `whenDone` resolves
   /// only once the pin is committed. Fully guarded: a caching failure must never
   /// fail the upload. No-op when no pin hooks were supplied (a non-pinned upload).
+  ///
+  /// Records the committed path in [_pinnedPath], which is what the completed
+  /// snapshot reports as this device's cache state. Left null on every path that
+  /// did not land bytes here, so the snapshot can never over-claim.
   Future<void> _settlePin(FileData confirmed) async {
     final finalize = _onPinFinalize;
     final defer = _onPinDeferred;
     try {
       if (finalize != null) {
-        await finalize(confirmed);
+        _pinnedPath = await finalize(confirmed);
         return;
       }
     } catch (_) {
@@ -475,10 +491,19 @@ abstract class UploadTask {
     }
   }
 
+  /// Settles `whenDone` with the server record, annotated with the cached copy
+  /// this upload committed — so a `cache: true` upload hands back a snapshot
+  /// whose `localPath` opens, without a follow-up `getSnapshot()`.
   void _completeTask(FileData? record) {
     if (!_taskCompleter.isCompleted) {
+      final pinned = _pinnedPath;
       _taskCompleter.complete(record != null
-          ? FileSnapshot.fromData(record, reference: reference)
+          ? FileSnapshot.fromData(
+              record,
+              reference: reference,
+              isCached: pinned != null,
+              localPath: pinned,
+            )
           : null);
     }
     _closeStreams();

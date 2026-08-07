@@ -11,5 +11,8 @@ abstract interface class UploadPinSink {
   Future<String?> resolveStagedUpload(String path);
 
   /// Moves the staged copy into the id-keyed cache and records a ready entry.
-  Future<void> finalizeUploadPin(String path, FileData confirmed);
+  ///
+  /// Returns the path the bytes now live at, or null when no copy survived to
+  /// commit and a deferred entry was recorded instead.
+  Future<String?> finalizeUploadPin(String path, FileData confirmed);
 }

@@ -66,13 +66,33 @@ void main() {
     ));
     final ref = ChildReference(path: 'a/b.png', api: api, catalog: catalog);
 
-    await ref.updateMetadata({'k': 'new'});
+    final snap = await ref.updateMetadata({'k': 'new'});
 
     final entry = await catalog.entryFor('a/b.png');
     expect(entry!.data.metadata['k'], 'new'); // metadata synced
     expect(entry.data.contentHash, 'etag-1'); // fingerprint NOT clobbered
     expect(entry.status, CatalogStatus.ready); // local state preserved
     expect(entry.localPath, '${tmp.path}/id1.png');
+    // The returned snapshot reports this device's cache state, like getSnapshot.
+    expect(snap.isCached, isTrue);
+    expect(snap.localPath, '${tmp.path}/id1.png');
+  });
+
+  test('updateMetadata reports a non-ready row as not cached', () async {
+    final api = _MetaApi();
+    final catalog = catFor(api);
+    await catalog.debugPut(CatalogEntry(
+      data: _data({'k': 'old'}, 'etag-1'),
+      localPath: '${tmp.path}/id1.png',
+      pinnedAt: DateTime.utc(2026, 1, 1),
+      status: CatalogStatus.stale, // bytes not usable yet
+    ));
+    final ref = ChildReference(path: 'a/b.png', api: api, catalog: catalog);
+
+    final snap = await ref.updateMetadata({'k': 'new'});
+
+    expect(snap.isCached, isFalse);
+    expect(snap.localPath, isNull);
   });
 
   test('updateMetadata leaves the cache alone when the file is not pinned',
@@ -85,6 +105,8 @@ void main() {
 
     expect(snap.data!.metadata['k'], 'new'); // server result still returned
     expect(await catalog.entryFor('a/b.png'), isNull); // nothing cached
+    expect(snap.isCached, isFalse);
+    expect(snap.localPath, isNull);
   });
 
   test('updateMetadata with no store just returns the server snapshot',

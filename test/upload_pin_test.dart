@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:test/test.dart';
+import 'package:winche_storage/src/offline/offline_catalog.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import 'support/noop_api.dart';
@@ -82,14 +83,20 @@ void main() {
         await File(src.path).copy(dst);
         return dst;
       },
-      onPinFinalize: (c) async => finalized = c,
+      onPinFinalize: (c) async {
+        finalized = c;
+        return '${tmp.path}/cached.bin';
+      },
       onPinDeferred: (c) async => fail('should not defer on success'),
     );
 
-    await task.whenDone;
+    final snap = await task.whenDone;
     expect(staged, isTrue);
     expect(finalized!.id, 'srv-id');
     expect(api.calls, isEmpty); // no download issued
+    // The committed copy is reported on the snapshot the caller awaits.
+    expect(snap!.isCached, isTrue);
+    expect(snap.localPath, '${tmp.path}/cached.bin');
   });
 
   test('staging failure falls back to deferred, upload still succeeds',
@@ -113,5 +120,66 @@ void main() {
     final snap = await task.whenDone;
     expect(snap, isNotNull); // upload succeeded
     expect(deferred!.id, 'srv-id');
+    expect(snap!.isCached, isFalse); // deferred: no bytes on this device
+    expect(snap.localPath, isNull);
+  });
+
+  OfflineCatalog catalogIn(Directory dir, WincheStorageApi api) =>
+      OfflineCatalog(
+        api: api,
+        store: MemoryStorageLocalStore(),
+        directoryResolver: () async => dir.path,
+      );
+
+  test('a pinned upload resolves whenDone with the cached copy annotated',
+      () async {
+    final api = _PinApi();
+    final cat = catalogIn(tmp, api);
+    final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
+    final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
+
+    final task = UploadTask.start(
+      reference: ref,
+      localPath: src.path,
+      mimeType: 'image/png',
+      multipartThreshold: 5 * 1024 * 1024,
+      httpClient: okDio(),
+      stageSource: () => cat.stageForUpload(ref, sourcePath: src.path),
+      onPinFinalize: (c) => cat.finalizePin(ref, c),
+      onPinDeferred: (c) => cat.markPinDeferred(ref, c),
+    );
+
+    final snap = await task.whenDone;
+
+    final cached = await ref.cachedFile();
+    expect(cached, isNotNull); // the copy really landed
+    expect(snap!.isCached, isTrue);
+    expect(snap.localPath, cached!.localPath);
+    expect(File(snap.localPath!).readAsBytesSync(), [1, 2, 3]);
+  });
+
+  test('a deferred pin resolves whenDone uncached', () async {
+    final api = _PinApi();
+    final cat = catalogIn(tmp, api);
+    final ref = ChildReference(path: 'a/b.png', api: api, catalog: cat);
+    final src = File('${tmp.path}/src.png')..writeAsBytesSync([1, 2, 3]);
+
+    final task = UploadTask.start(
+      reference: ref,
+      localPath: src.path,
+      mimeType: 'image/png',
+      multipartThreshold: 5 * 1024 * 1024,
+      httpClient: okDio(),
+      stageSource: () async => throw StateError('disk full'),
+      onPinFinalize: (c) => cat.finalizePin(ref, c),
+      onPinDeferred: (c) => cat.markPinDeferred(ref, c),
+    );
+
+    final snap = await task.whenDone;
+
+    // Nothing was staged, so no bytes landed — the snapshot must not claim any.
+    expect(await ref.cachedFile(), isNull);
+    expect(snap!.isCached, isFalse);
+    expect(snap.localPath, isNull);
   });
 }

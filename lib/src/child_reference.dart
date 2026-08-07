@@ -193,7 +193,9 @@ final class ChildReference {
   /// from the staged copy, then moved into the id-keyed cache on success
   /// (best-effort — a caching failure leaves the upload successful and records a
   /// row a later [keepCached] fills in). Requires a configured store, else
-  /// throws `StateError`.
+  /// throws `StateError`. The task's `whenDone` snapshot reports the committed
+  /// copy on `isCached`/`localPath`, so nothing has to be read back — and
+  /// reports neither when the copy was deferred.
   UploadTask uploadPath(
     String localPath, {
     String? mimeType,
@@ -252,7 +254,8 @@ final class ChildReference {
   ///
   /// [cache] also keeps the bytes on this device: they are staged to disk
   /// first, uploaded from the staged copy, then moved into the id-keyed cache
-  /// on success (best-effort). Requires a configured store, else throws
+  /// on success (best-effort), and reported on the `whenDone` snapshot's
+  /// `isCached`/`localPath`. Requires a configured store, else throws
   /// `StateError`. Byte uploads are not durable — for a queued upload,
   /// write the bytes to a file and use [uploadPath] with `enqueue: true`.
   UploadTask uploadBytes(
@@ -297,10 +300,20 @@ final class ChildReference {
   /// file does not exist. When this file is cached, its cached metadata is
   /// updated too (content fingerprint preserved) — runs only after the server
   /// write succeeds.
+  ///
+  /// The returned snapshot is annotated with this device's cache state, like
+  /// [getSnapshot] — read from the row the sync just wrote, so it costs no
+  /// extra lookup.
   Future<FileSnapshot> updateMetadata(Map<String, dynamic> metadata) async {
     final updatedData = await api.updateMetadata(path, metadata);
-    await catalog?.syncMetadata(path, updatedData.metadata);
-    return FileSnapshot.fromData(updatedData, reference: this);
+    final row = await catalog?.syncMetadata(path, updatedData.metadata);
+    final cached = row != null && row.status == CatalogStatus.ready;
+    return FileSnapshot.fromData(
+      updatedData,
+      reference: this,
+      isCached: cached,
+      localPath: cached ? row.localPath : null,
+    );
   }
 
   /// Deletes from the server. Returns true if a file was deleted.

@@ -322,7 +322,10 @@ final task = photoRef.uploadPath(
   enqueue: true,
   cache: true,
 );
-await task.whenDone;
+final snapshot = await task.whenDone;
+// `cache: true` — the copy is committed, so the snapshot carries it:
+snapshot!.isCached;  // true
+snapshot.localPath;  // the cached bytes, ready to open
 ```
 
 A flag whose subsystem isn't configured throws `StateError` (see
@@ -544,8 +547,10 @@ simply `await` it.
 
 When an upload's `whenDone` resolves, it has fully landed: the durable record is
 already gone from `pendingUploads()`, the `completed` event has already been
-emitted, and a `cache: true` upload's offline copy is already committed. You can
-read any of them on the next line without waiting.
+emitted, and a `cache: true` upload's offline copy is already committed — and
+reported on the returned snapshot as `isCached` / `localPath`, so you need no
+follow-up read to use the bytes. You can read any of them on the next line
+without waiting.
 
 A durable (`enqueue: true`) upload is **tracked** and deduped by path: calling
 `uploadPath` again for the same path returns the existing handle rather than
@@ -664,7 +669,7 @@ configured.
 | `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, cache})` | Starts an `UploadTask` from raw bytes. `cache: true` caches it. Not durable — use `uploadPath(enqueue: true)` for that. |
 | `download(saveTo)` | Starts a one-shot `DownloadTask` to the explicit path `saveTo`, with in-session retry. |
 | `resumeUpload()` | Resumes this path's queued/paused durable upload. Requires a store. |
-| `updateMetadata(metadata)` | Updates server-side metadata. Returns a `FileSnapshot`. If the file is cached, its cached metadata is updated too (content fingerprint preserved). |
+| `updateMetadata(metadata)` | Updates server-side metadata. Returns a `FileSnapshot` annotated with this device's cache state. If the file is cached, its cached metadata is updated too (content fingerprint preserved). |
 | `delete()` | Deletes the file. Returns `bool`. |
 
 Cache and durable-upload methods throw `StateError` when no store is configured
@@ -676,7 +681,7 @@ Cache and durable-upload methods throw `StateError` when no store is configured
 | --- | --- | --- |
 | `state` | `UploadTaskState` | Current synchronous snapshot of status + progress. |
 | `stateStream` | `Stream<UploadTaskState>` | Broadcast stream of state changes. |
-| `whenDone` | `Future<FileSnapshot?>` | Completes with the confirmed `FileSnapshot`, or `null` if cancelled. |
+| `whenDone` | `Future<FileSnapshot?>` | Completes with the confirmed `FileSnapshot`, or `null` if cancelled. For a `cache: true` upload the snapshot carries the committed copy (`isCached` / `localPath`). |
 | `pause()` | — | Cancels the in-flight request; preserves uploaded parts. |
 | `resume()` | — | Restarts from the last completed part. |
 | `cancel()` | `Future<void>` | Cancels the upload and deletes the remote file record. |
