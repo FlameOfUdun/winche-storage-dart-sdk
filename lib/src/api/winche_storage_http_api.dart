@@ -76,6 +76,7 @@ final class WincheStorageHttpApi implements WincheStorageApi {
   StorageErrorStatus _statusFromHttp(int code) {
     switch (code) {
       case 400:
+      case 413: // over the server's file size limit: retrying can't help
         return StorageErrorStatus.invalidArgument;
       case 401:
         return StorageErrorStatus.unauthenticated;

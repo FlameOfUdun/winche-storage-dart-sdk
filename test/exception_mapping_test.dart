@@ -37,6 +37,12 @@ void main() {
         throwsA(isA<StorageInvalidArgumentException>()));
   });
 
+  test('413 (over the size limit) -> StorageInvalidArgumentException, not retried', () {
+    final api = _fail(statusCode: 413, data: {'error': 'too large'});
+    expect(() => api.setFile('a', 'video/mp4', 1 << 40),
+        throwsA(isA<StorageInvalidArgumentException>()));
+  });
+
   test('getFile 404 -> null (not thrown)', () async {
     final api = _fail(statusCode: 404, data: {'error': 'nf'});
     expect(await api.getFile('a'), isNull);
