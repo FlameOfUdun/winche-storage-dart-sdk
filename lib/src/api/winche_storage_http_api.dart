@@ -52,6 +52,7 @@ final class WincheStorageHttpApi implements WincheStorageApi {
       case DioExceptionType.connectionTimeout:
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
+      case DioExceptionType.transformTimeout:
         return const StorageDeadlineExceededException(
             'Request timed out', {'statusCode': 408});
       case DioExceptionType.connectionError:

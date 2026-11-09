@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:dio/dio.dart';
 import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_exception.dart';
@@ -37,6 +40,26 @@ TransferFailureClass classifyTransferFailure(Object error) {
   // spend the budget on a session that no longer exists — for a transfer core
   // is already tearing down.
   if (error is WincheSessionExpired) return TransferFailureClass.pause;
+  // The byte transfer itself (the presigned PUT to object storage) surfaces
+  // Dio's own errors. A dropped or absent network there is a pause like any
+  // other: counting it as a retry spent the whole budget in about a minute
+  // offline and left the upload failed until the next app start.
+  if (error is DioException) {
+    return switch (error.type) {
+      DioExceptionType.connectionError ||
+      DioExceptionType.connectionTimeout ||
+      DioExceptionType.sendTimeout ||
+      DioExceptionType.receiveTimeout =>
+        TransferFailureClass.pause,
+      DioExceptionType.unknown when error.error is SocketException ||
+              error.error is HttpException =>
+        TransferFailureClass.pause,
+      // An HTTP error from the bucket (an expired presigned URL is a 403) is
+      // retried: the next attempt asks for a fresh upload session.
+      _ => TransferFailureClass.retry,
+    };
+  }
+  if (error is SocketException) return TransferFailureClass.pause;
   if (error is! WincheStorageException) return TransferFailureClass.retry;
   return switch (error.status) {
     // Clears when the token is refreshed or the network returns.
