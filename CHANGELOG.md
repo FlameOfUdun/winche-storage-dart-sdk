@@ -1,6 +1,12 @@
 # CHANGELOG
 
 
+## 5.1.4
+
+- A 413 from the server (file over its size limit, Winche.Storage 8.2.0) maps to
+  `StorageInvalidArgumentException`, so the upload fails at once instead of
+  being retried and left in the queue.
+
 ## 5.1.3
 
 - **Fix: an upload no longer gives up after a minute offline.** A network
