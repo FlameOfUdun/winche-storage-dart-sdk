@@ -1,5 +1,18 @@
 # CHANGELOG
 
+
+## 5.1.3
+
+- **Fix: an upload no longer gives up after a minute offline.** A network
+  failure during the byte transfer (the presigned PUT) surfaced as Dio's own
+  exception and was classed as a retry, so going offline spent all
+  `maxAttempts` within about a minute and left the upload failed until the
+  next app start. Connection errors, timeouts and socket errors there now
+  pause the upload (no attempt counted) like an unreachable API does. HTTP
+  errors from the bucket are still retried with a fresh session.
+- **Fix: compiles against dio 5.9.x**, which added
+  `DioExceptionType.transformTimeout` (mapped to deadline exceeded).
+
 ## 5.1.2
 
 ### Fixed: a `cache: true` upload's `whenDone` reported the file as not cached
