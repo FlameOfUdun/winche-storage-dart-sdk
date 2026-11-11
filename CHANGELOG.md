@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 5.1.5
+
+- **Fix: requires `dio` 5.11.** 5.1.4 uses `DioExceptionType.transformTimeout`, added in `dio` 5.11, but allowed
+  `dio` 5.9.2 — an app resolving 5.9.x failed to compile ("Member not found: 'transformTimeout'").
+
 
 ## 5.1.4
 
