@@ -95,7 +95,14 @@ final class WincheStorageConfig {
     this.retryMaxDelay = const Duration(seconds: 30),
     this.retryMaxAttempts = 5,
     this.retryPollInterval = const Duration(seconds: 30),
+    this.allowSignedOut = false,
   });
+
+  /// Use storage while nobody is signed in (default false): requests go without
+  /// a token and the server's rules decide (`request.auth == null`) — public
+  /// files, or an app with no sign-in at all. The signed-out session keeps its
+  /// transfer queue in memory only, and ends when someone signs in.
+  final bool allowSignedOut;
 }
 
 /// The entry point for the Winche Storage Dart SDK.
@@ -147,7 +154,20 @@ final class WincheStorage extends WincheStorageService {
   late final StorageBinding _binding = StorageBinding(
     registry: _oneShots,
     onUse: () => _started = true,
+    bindSignedOut: _bindSignedOut,
   );
+
+  /// With [WincheStorageConfig.allowSignedOut] and nobody signed in: a session
+  /// with no token and a memory-only queue. Whether one was bound.
+  bool _bindSignedOut() {
+    if (!_config.allowSignedOut || isDisposed || _isBound) return false;
+    final endpoint = app.options?.storageEndpoint;
+    if (endpoint == null) {
+      throw StateError('WincheOptions.storageEndpoint is required to use winche_storage.');
+    }
+    _bind(api: WincheStorageHttpApi(baseUrl: endpoint.toString()), store: MemoryStorageLocalStore(), resolveDirectory: null);
+    return true;
+  }
 
   bool _started = false;
 

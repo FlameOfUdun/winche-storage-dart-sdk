@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 5.2.0
+
+- **New: signed-out access.** `WincheStorageConfig(allowSignedOut: true)` lets storage work while nobody is signed in,
+  and in an app with no auth service at all: requests go without a token and the server's rules decide. The signed-out
+  session's queue is in memory only, and it's replaced when someone signs in. Off by default.
+
 ## 5.1.5
 
 - **Fix: requires `dio` 5.11.** 5.1.4 uses `DioExceptionType.transformTimeout`, added in `dio` 5.11, but allowed

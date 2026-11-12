@@ -198,6 +198,20 @@ crossed the wire, and being signed out is fixed by signing in rather than by
 handling it where server errors are handled. It *is* a `WincheException`, core's
 root for the whole stack, so `on WincheException` catches it.
 
+### Signed-out access
+
+To use storage while nobody is signed in — public files, or an app with no
+sign-in at all:
+
+```dart
+storage.config = const WincheStorageConfig(allowSignedOut: true);
+```
+
+Requests then go without a token and the server's rules decide
+(`allow read: if true;`, `request.auth == null`). The signed-out session keeps
+its transfer queue in memory only, needs no auth service, and is replaced when
+someone signs in.
+
 ## How a transfer flows
 
 Uploads and downloads are deliberately asymmetric. An upload is the **only copy**
