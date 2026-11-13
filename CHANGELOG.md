@@ -14,6 +14,9 @@ On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
   on `UploadTask`, `DownloadTask`, `TransferController` and `OfflineCatalog` take a `WincheHttp` (in tests,
   `WincheHttp.standalone(client: MockClient(…))`).
 - **`WincheStorageHttpApi(endpoint:, http:, session:)`** replaces `(baseUrl:, tokenProvider:, httpClient:)`.
+- **`WincheStorageException`** has the shared `code` (`WincheErrorCode`), `reason` and `statusCode`; switch on `code`.
+  The per-kind subclasses, `status` (`StorageErrorStatus`), `details` and `fromStatus` are deprecated, and still
+  thrown and filled for this release.
 
 ### New
 

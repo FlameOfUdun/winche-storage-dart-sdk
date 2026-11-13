@@ -68,8 +68,8 @@ void main() {
   group('errors from the byte transfer (presigned PUT)', () {
     test('a lost network pauses instead of spending attempts', () {
       for (final e in <Object>[
-        const WincheHttpException(WincheHttpException.unavailable, 'connection refused'),
-        const WincheHttpException(WincheHttpException.timeout, 'no answer'),
+        const WincheHttpException(WincheErrorCode.unavailable, 'connection refused'),
+        const WincheHttpException(WincheErrorCode.deadlineExceeded, 'no answer'),
         const SocketException('Network is unreachable'),
       ]) {
         expect(classifyTransferFailure(e), TransferFailureClass.pause, reason: '$e');
@@ -77,8 +77,8 @@ void main() {
     });
 
     test('an HTTP error from the bucket is retried with a fresh session', () {
-      expect(classifyTransferFailure(const WincheHttpException('http-403', 'expired', status: 403)), TransferFailureClass.retry);
-      expect(classifyTransferFailure(const WincheHttpException('http-503', 'busy', status: 503)), TransferFailureClass.retry);
+      expect(classifyTransferFailure(const WincheHttpException(WincheErrorCode.permissionDenied, 'expired', status: 403)), TransferFailureClass.retry);
+      expect(classifyTransferFailure(const WincheHttpException(WincheErrorCode.unavailable, 'busy', status: 503)), TransferFailureClass.retry);
     });
   });
 }

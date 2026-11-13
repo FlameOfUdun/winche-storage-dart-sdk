@@ -12,7 +12,7 @@ class _FlakyApi extends NoopApi {
   FileData? _rec;
   @override
   Future<FileData?> getFile(String path) async {
-    if (!online) throw const StorageUnavailableException('offline');
+    if (!online) throw StorageUnavailableException('offline');
     return _rec;
   }
 

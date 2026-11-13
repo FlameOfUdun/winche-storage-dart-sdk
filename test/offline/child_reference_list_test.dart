@@ -37,7 +37,7 @@ class _OfflineListApi extends NoopApi {
   @override
   Future<List<FileData>> listDirectory(String directory,
           {String? mimeType}) async =>
-      throw const StorageUnavailableException('offline');
+      throw StorageUnavailableException('offline');
 }
 
 /// listDirectory fails with a non-offline error.
@@ -45,7 +45,7 @@ class _ErrorListApi extends NoopApi {
   @override
   Future<List<FileData>> listDirectory(String directory,
           {String? mimeType}) async =>
-      throw const StorageInternalException('boom');
+      throw StorageInternalException('boom');
 }
 
 CatalogEntry _entry(String path, String dir, {String mime = 'image/png'}) =>

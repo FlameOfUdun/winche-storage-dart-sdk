@@ -14,7 +14,7 @@ class _UpApi extends NoopApi {
   FileData? _rec;
   @override
   Future<FileData?> getFile(String path) async {
-    if (fail) throw const StorageUnavailableException('offline');
+    if (fail) throw StorageUnavailableException('offline');
     return _rec;
   }
 

@@ -46,30 +46,34 @@ TransferFailureClass classifyTransferFailure(Object error) {
   // HTTP error from the bucket (an expired presigned URL is a 403) is retried:
   // the next attempt asks for a fresh upload session.
   if (error is WincheHttpException) {
-    return error.status == null && error.code != WincheHttpException.aborted
+    return error.status == null && error.code != WincheErrorCode.cancelled
         ? TransferFailureClass.pause
         : TransferFailureClass.retry;
   }
   if (error is SocketException) return TransferFailureClass.pause;
   if (error is! WincheStorageException) return TransferFailureClass.retry;
-  return switch (error.status) {
+  return switch (error.code) {
     // Clears when the token is refreshed or the network returns.
-    StorageErrorStatus.unauthenticated ||
-    StorageErrorStatus.unavailable =>
-      TransferFailureClass.pause,
+    WincheErrorCode.unauthenticated || WincheErrorCode.unavailable => TransferFailureClass.pause,
 
     // The request itself is rejected; repeating it verbatim cannot help.
-    StorageErrorStatus.permissionDenied ||
-    StorageErrorStatus.notFound ||
-    StorageErrorStatus.invalidArgument ||
-    StorageErrorStatus.failedPrecondition =>
+    WincheErrorCode.permissionDenied ||
+    WincheErrorCode.notFound ||
+    WincheErrorCode.invalidArgument ||
+    WincheErrorCode.failedPrecondition ||
+    WincheErrorCode.alreadyExists ||
+    WincheErrorCode.outOfRange ||
+    WincheErrorCode.unimplemented =>
       TransferFailureClass.terminal,
 
-    // Server-side or ambiguous — worth a bounded number of retries.
-    StorageErrorStatus.internal ||
-    StorageErrorStatus.deadlineExceeded ||
-    StorageErrorStatus.cancelled ||
-    StorageErrorStatus.unknown =>
+    // Server-side, ambiguous or a limit — worth a bounded number of retries.
+    WincheErrorCode.internal ||
+    WincheErrorCode.deadlineExceeded ||
+    WincheErrorCode.cancelled ||
+    WincheErrorCode.aborted ||
+    WincheErrorCode.resourceExhausted ||
+    WincheErrorCode.dataLoss ||
+    WincheErrorCode.unknown =>
       TransferFailureClass.retry,
   };
 }

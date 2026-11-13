@@ -56,40 +56,9 @@ final class WincheStorageHttpApi implements WincheStorageApi {
         return null;
       }
     } on WincheUnboundException {
-      throw const StorageUnauthenticatedException('No auth token available for the current session.', {'statusCode': 401});
+      throw WincheStorageException.of(WincheErrorCode.unauthenticated, 'No auth token available for the current session.', statusCode: 401);
     } on WincheHttpException catch (e) {
-      throw _map(e);
-    }
-  }
-
-  WincheStorageException _map(WincheHttpException e) {
-    final status = e.status;
-    if (status == null) {
-      return switch (e.code) {
-        WincheHttpException.timeout => const StorageDeadlineExceededException('Request timed out', {'statusCode': 408}),
-        WincheHttpException.aborted => const StorageCancelledException('Request was cancelled', {'statusCode': 499}),
-        _ => StorageUnavailableException(e.message, const {'statusCode': 503}),
-      };
-    }
-    return WincheStorageException.fromStatus(_statusFromHttp(status), e.message, {'statusCode': status});
-  }
-
-  StorageErrorStatus _statusFromHttp(int code) {
-    switch (code) {
-      case 400:
-      case 413: // over the server's file size limit: retrying can't help
-        return StorageErrorStatus.invalidArgument;
-      case 401:
-        return StorageErrorStatus.unauthenticated;
-      case 403:
-        return StorageErrorStatus.permissionDenied;
-      case 404:
-        return StorageErrorStatus.notFound;
-      case 409:
-      case 412:
-        return StorageErrorStatus.failedPrecondition;
-      default:
-        return code >= 500 ? StorageErrorStatus.internal : StorageErrorStatus.unknown;
+      throw WincheStorageException.of(e.code, e.message, reason: e.reason, statusCode: e.status);
     }
   }
 

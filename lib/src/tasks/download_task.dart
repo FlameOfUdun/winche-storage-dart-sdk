@@ -375,7 +375,7 @@ class _DirectDownloadTask extends DownloadTask {
     _setStatus(DownloadTaskStatus.cancelled);
     if (!_taskCompleter.isCompleted) {
       _taskCompleter.completeError(
-          const StorageCancelledException('WincheStorage was closed.'));
+          WincheStorageException.of(WincheErrorCode.cancelled, 'WincheStorage was closed.'));
     }
     _closeStreams();
   }

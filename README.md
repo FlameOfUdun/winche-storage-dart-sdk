@@ -116,7 +116,7 @@ There is no `close()`. Core tears a session down on sign-out and disposes the
 service with the app, in dependency order — one-shot transfers, then the
 upload queue, then the store — never waiting on the network. Durable uploads
 are left resumable; one-shot transfers fail with
-`StorageCancelledException`.
+a `WincheStorageException` with code `cancelled`.
 
 ## Multi-user
 
@@ -459,7 +459,7 @@ for (final snap in listing.files) {
 #### Reads are always live; listings tell you what's cached
 
 `getSnapshot()` and `listChildren()` are server reads. They throw
-`StorageUnavailableException` when the server is unreachable — there is no
+a `WincheStorageException` with code `unavailable` when the server is unreachable — there is no
 metadata cache to fall back to. What they *do* carry is this device's cache
 state, per file:
 
@@ -584,7 +584,7 @@ for (final snapshot in dir.files) {
 }
 ```
 
-`listChildren()` is a server read — it throws `StorageUnavailableException` when
+`listChildren()` is a server read — it throws a `WincheStorageException` with code `unavailable` when
 offline, since listings are never cached. Each returned `FileSnapshot` carries
 `isCached` / `localPath` for this device, so one call tells you both what exists
 and what you already hold (see [File cache](#file-cache)).
@@ -671,11 +671,11 @@ configured.
 | `name` | The last path segment (e.g. `photo.jpg`). |
 | `parent` | The parent reference, or `null` at a single-segment path. |
 | `child(path)` | Returns a new `ChildReference` at `this.path/path`. |
-| `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws `StorageUnavailableException` when offline. |
+| `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws a `WincheStorageException` with code `unavailable` when offline. |
 | `listChildren({mimeType})` | Lists files under this path from the **server**, returning a `DirectorySnapshot` whose `.files` each carry `isCached` / `localPath`; throws when offline. For what is on disk without a network call, use `cachedFiles()`. |
 | `cachedFile()` | `Future<CachedFile?>` — the local copy, or `null` when this device has no usable bytes. Never contacts the server; verified against the disk, so a returned `localPath` always opens. Requires a store. |
 | `cachedFiles()` | `Future<List<CachedFile>>` — the cached files **directly under** this path, sorted by path and each verified against the disk. Never contacts the server, so it is the one directory-shaped read that works offline. Empty when nothing here is cached. Requires a store. |
-| `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws `StorageNotFoundException` when the server has no record, and `StorageFailedPreconditionException` when it has a record but no bytes. Requires a store. |
+| `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws a `WincheStorageException` with code `notFound` when the server has no record, and one with code `failedPrecondition` when it has a record but no bytes. Requires a store. |
 | `refreshCache()` | Unconditionally re-downloads the current remote version. Requires a store. |
 | `checkForUpdate()` | `Future<CacheStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `remoteIncomplete` / `unknown` (offline). **Round-trips**, unlike the other cache methods. Requires a store. |
 | `clearCache()` | Drops this file's cached bytes and catalog row. Requires a store. |
@@ -774,25 +774,24 @@ Always the authoritative server listing — listings are never cached.
 
 ### `WincheStorageException`
 
-A sealed exception hierarchy thrown on API errors. Each carries a semantic
-`status` (`StorageErrorStatus`), a `message`, optional `details`, and the
-originating `statusCode`.
+What storage throws when a request fails: a `WincheException` with a `code` from the list every Winche package shares
+(`WincheErrorCode`), a `message`, the server's `reason` when it sent a more precise one (`too-large`,
+`size-mismatch`, `upload-status`, `not-uploaded`), and the HTTP `statusCode`.
 
 ```dart
 try {
   await photoRef.updateMetadata({'label': 'hero'});
-} on StorageNotFoundException catch (e) {
-  print('not found: ${e.message}');
 } on WincheStorageException catch (e) {
-  print('${e.statusCode}: ${e.message}');
+  switch (e.code) {
+    case WincheErrorCode.notFound: print('not found: ${e.message}');
+    case WincheErrorCode.permissionDenied: print('not allowed');
+    default: if (e.isTransient) retryLater();
+  }
 }
 ```
 
-Subclasses: `StorageNotFoundException`, `StoragePermissionDeniedException`,
-`StorageUnauthenticatedException`, `StorageInvalidArgumentException`,
-`StorageFailedPreconditionException`, `StorageDeadlineExceededException`,
-`StorageUnavailableException`, `StorageCancelledException`,
-`StorageInternalException`, `StorageUnknownException`.
+The 5.x subclasses (a `WincheStorageException` with code `notFound`, a `WincheStorageException` with code `unavailable`, …), `status` (`StorageErrorStatus`) and
+`details` still work, deprecated, until the next major version.
 
 ## Dependencies
 

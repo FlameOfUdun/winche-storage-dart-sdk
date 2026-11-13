@@ -1,6 +1,74 @@
+// The per-kind subclasses are deprecated for callers, but storage still throws them for one release so existing
+// `on StorageNotFoundException` catches keep working.
+// ignore_for_file: deprecated_member_use_from_same_package
+
 import 'package:winche_core/winche_core.dart';
 
-/// Semantic error statuses for Winche Storage, mapped from HTTP/transport failures.
+/// A storage request failed.
+///
+/// [code] is the kind every Winche package shares; switch on it rather than on
+/// subclasses. [reason] is the server's more precise code where it sent one
+/// (`too-large`, `size-mismatch`, `upload-status`, `not-uploaded`).
+///
+/// `on WincheException` asks "did any Winche SDK fail?"; `on
+/// WincheStorageException` asks "did storage?". A [WincheUnboundException] or
+/// `WincheSessionExpired` is neither: it never reached the server.
+class WincheStorageException extends WincheException {
+  /// Creates an exception of kind [code]. Storage itself throws through [of].
+  const WincheStorageException(super.code, super.message, {this.reason, this.statusCode});
+
+  /// The server's more precise code, when it sent one.
+  final String? reason;
+
+  /// An exception of kind [code]: for this release, the deprecated subclass
+  /// for that kind when there is one, so catches on those keep working.
+  factory WincheStorageException.of(WincheErrorCode code, String message, {String? reason, int? statusCode}) => switch (code) {
+    WincheErrorCode.notFound => StorageNotFoundException._(message, statusCode, reason),
+    WincheErrorCode.permissionDenied => StoragePermissionDeniedException._(message, statusCode, reason),
+    WincheErrorCode.unauthenticated => StorageUnauthenticatedException._(message, statusCode, reason),
+    WincheErrorCode.invalidArgument => StorageInvalidArgumentException._(message, statusCode, reason),
+    WincheErrorCode.failedPrecondition => StorageFailedPreconditionException._(message, statusCode, reason),
+    WincheErrorCode.deadlineExceeded => StorageDeadlineExceededException._(message, statusCode, reason),
+    WincheErrorCode.unavailable => StorageUnavailableException._(message, statusCode, reason),
+    WincheErrorCode.cancelled => StorageCancelledException._(message, statusCode, reason),
+    WincheErrorCode.internal => StorageInternalException._(message, statusCode, reason),
+    WincheErrorCode.unknown => StorageUnknownException._(message, statusCode, reason),
+    _ => WincheStorageException(code, message, reason: reason, statusCode: statusCode),
+  };
+
+  /// The HTTP status, when there was an answer.
+  final int? statusCode;
+
+  /// The old name for [code]'s kind.
+  @Deprecated('Use code (WincheErrorCode). Removed in the next major version.')
+  StorageErrorStatus get status => switch (code) {
+    WincheErrorCode.notFound => StorageErrorStatus.notFound,
+    WincheErrorCode.permissionDenied => StorageErrorStatus.permissionDenied,
+    WincheErrorCode.unauthenticated => StorageErrorStatus.unauthenticated,
+    WincheErrorCode.invalidArgument => StorageErrorStatus.invalidArgument,
+    WincheErrorCode.failedPrecondition => StorageErrorStatus.failedPrecondition,
+    WincheErrorCode.deadlineExceeded => StorageErrorStatus.deadlineExceeded,
+    WincheErrorCode.unavailable => StorageErrorStatus.unavailable,
+    WincheErrorCode.cancelled => StorageErrorStatus.cancelled,
+    WincheErrorCode.internal => StorageErrorStatus.internal,
+    _ => StorageErrorStatus.unknown,
+  };
+
+  /// The old place for [statusCode].
+  @Deprecated('Use statusCode. Removed in the next major version.')
+  Map<String, Object?>? get details => statusCode == null ? null : {'statusCode': statusCode};
+
+  /// The old way to make one.
+  @Deprecated('Use WincheStorageException.of. Removed in the next major version.')
+  factory WincheStorageException.fromStatus(StorageErrorStatus status, String message, [Map<String, Object?>? details]) =>
+      WincheStorageException.of(status._code, message, statusCode: details?['statusCode'] as int?);
+
+  @override
+  String toString() => 'WincheStorageException(${code.wireName}${reason == null ? '' : '/$reason'}): $message';
+}
+
+/// The old kinds of storage error.
+@Deprecated('Use WincheErrorCode. Removed in the next major version.')
 enum StorageErrorStatus {
   notFound,
   permissionDenied,
@@ -11,112 +79,120 @@ enum StorageErrorStatus {
   unavailable,
   cancelled,
   internal,
-  unknown,
+  unknown;
+
+  WincheErrorCode get _code => switch (this) {
+    notFound => WincheErrorCode.notFound,
+    permissionDenied => WincheErrorCode.permissionDenied,
+    unauthenticated => WincheErrorCode.unauthenticated,
+    invalidArgument => WincheErrorCode.invalidArgument,
+    failedPrecondition => WincheErrorCode.failedPrecondition,
+    deadlineExceeded => WincheErrorCode.deadlineExceeded,
+    unavailable => WincheErrorCode.unavailable,
+    cancelled => WincheErrorCode.cancelled,
+    internal => WincheErrorCode.internal,
+    unknown => WincheErrorCode.unknown,
+  };
 }
 
-/// Base exception for every failure this package's backend reports.
-///
-/// Sits one level under core's [WincheException], the root for the whole
-/// Winche stack. That is the intended shape: `on WincheException` asks "did
-/// any Winche SDK fail?", while `on WincheStorageException` asks the narrower
-/// and usually more useful "did the *storage backend* reject this?" — a
-/// question a client-side lifecycle failure like [WincheUnboundException]
-/// should not answer yes to.
-sealed class WincheStorageException extends WincheException {
-  final StorageErrorStatus status;
-  final Map<String, Object?>? details;
+int? _statusOf(Map<String, Object?>? details) => details?['statusCode'] as int?;
 
-  const WincheStorageException(this.status, super.message, [this.details]);
-
-  /// Returns the most specific subclass for [status].
-  factory WincheStorageException.fromStatus(
-    StorageErrorStatus status,
-    String message, [
-    Map<String, Object?>? details,
-  ]) {
-    return switch (status) {
-      StorageErrorStatus.notFound => StorageNotFoundException(message, details),
-      StorageErrorStatus.permissionDenied =>
-        StoragePermissionDeniedException(message, details),
-      StorageErrorStatus.unauthenticated =>
-        StorageUnauthenticatedException(message, details),
-      StorageErrorStatus.invalidArgument =>
-        StorageInvalidArgumentException(message, details),
-      StorageErrorStatus.failedPrecondition =>
-        StorageFailedPreconditionException(message, details),
-      StorageErrorStatus.deadlineExceeded =>
-        StorageDeadlineExceededException(message, details),
-      StorageErrorStatus.unavailable =>
-        StorageUnavailableException(message, details),
-      StorageErrorStatus.cancelled =>
-        StorageCancelledException(message, details),
-      StorageErrorStatus.internal => StorageInternalException(message, details),
-      StorageErrorStatus.unknown => StorageUnknownException(message, details),
-    };
-  }
-
-  /// The originating HTTP status code, when known (carried in [details]).
-  int? get statusCode => details?['statusCode'] as int?;
-
-  @override
-  String toString() => '$runtimeType($status): $message';
-}
-
+/// Storage's `notFound`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.notFound. Removed in the next major version.')
 final class StorageNotFoundException extends WincheStorageException {
-  const StorageNotFoundException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.notFound, message, details);
+  StorageNotFoundException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.notFound, message, statusCode: _statusOf(details));
+
+  StorageNotFoundException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.notFound, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `permissionDenied`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.permissionDenied. Removed in the next major version.')
 final class StoragePermissionDeniedException extends WincheStorageException {
-  const StoragePermissionDeniedException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.permissionDenied, message, details);
+  StoragePermissionDeniedException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.permissionDenied, message, statusCode: _statusOf(details));
+
+  StoragePermissionDeniedException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.permissionDenied, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `unauthenticated`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.unauthenticated. Removed in the next major version.')
 final class StorageUnauthenticatedException extends WincheStorageException {
-  const StorageUnauthenticatedException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.unauthenticated, message, details);
+  StorageUnauthenticatedException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.unauthenticated, message, statusCode: _statusOf(details));
+
+  StorageUnauthenticatedException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.unauthenticated, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `invalidArgument`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.invalidArgument. Removed in the next major version.')
 final class StorageInvalidArgumentException extends WincheStorageException {
-  const StorageInvalidArgumentException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.invalidArgument, message, details);
+  StorageInvalidArgumentException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.invalidArgument, message, statusCode: _statusOf(details));
+
+  StorageInvalidArgumentException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.invalidArgument, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `failedPrecondition`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.failedPrecondition. Removed in the next major version.')
 final class StorageFailedPreconditionException extends WincheStorageException {
-  const StorageFailedPreconditionException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.failedPrecondition, message, details);
+  StorageFailedPreconditionException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.failedPrecondition, message, statusCode: _statusOf(details));
+
+  StorageFailedPreconditionException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.failedPrecondition, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `deadlineExceeded`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.deadlineExceeded. Removed in the next major version.')
 final class StorageDeadlineExceededException extends WincheStorageException {
-  const StorageDeadlineExceededException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.deadlineExceeded, message, details);
+  StorageDeadlineExceededException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.deadlineExceeded, message, statusCode: _statusOf(details));
+
+  StorageDeadlineExceededException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.deadlineExceeded, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `unavailable`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.unavailable. Removed in the next major version.')
 final class StorageUnavailableException extends WincheStorageException {
-  const StorageUnavailableException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.unavailable, message, details);
+  StorageUnavailableException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.unavailable, message, statusCode: _statusOf(details));
+
+  StorageUnavailableException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.unavailable, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `cancelled`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.cancelled. Removed in the next major version.')
 final class StorageCancelledException extends WincheStorageException {
-  const StorageCancelledException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.cancelled, message, details);
+  StorageCancelledException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.cancelled, message, statusCode: _statusOf(details));
+
+  StorageCancelledException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.cancelled, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `internal`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.internal. Removed in the next major version.')
 final class StorageInternalException extends WincheStorageException {
-  const StorageInternalException(String message,
-      [Map<String, Object?>? details])
-      : super(StorageErrorStatus.internal, message, details);
+  StorageInternalException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.internal, message, statusCode: _statusOf(details));
+
+  StorageInternalException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.internal, message, statusCode: statusCode, reason: reason);
 }
 
+/// Storage's `unknown`.
+@Deprecated('Catch WincheStorageException and check code == WincheErrorCode.unknown. Removed in the next major version.')
 final class StorageUnknownException extends WincheStorageException {
-  const StorageUnknownException(String message, [Map<String, Object?>? details])
-      : super(StorageErrorStatus.unknown, message, details);
+  StorageUnknownException(String message, [Map<String, Object?>? details])
+    : super(WincheErrorCode.unknown, message, statusCode: _statusOf(details));
+
+  StorageUnknownException._(String message, int? statusCode, String? reason)
+    : super(WincheErrorCode.unknown, message, statusCode: statusCode, reason: reason);
 }

@@ -136,7 +136,7 @@ void main() {
   });
 
   test('checkForUpdate: unknown when offline', () async {
-    final cat = buildThrowing(const StorageUnavailableException('offline'));
+    final cat = buildThrowing(StorageUnavailableException('offline'));
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
       localPath: '${tmp.path}/id-a_b.png',
@@ -147,7 +147,7 @@ void main() {
   });
 
   test('checkForUpdate: rethrows non-offline API errors', () async {
-    final cat = buildThrowing(const StorageInternalException('boom'));
+    final cat = buildThrowing(StorageInternalException('boom'));
     await cat.debugPut(CatalogEntry(
       data: _data('a/b.png', hash: 'h1'),
       localPath: '${tmp.path}/id-a_b.png',

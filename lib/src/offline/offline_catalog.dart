@@ -160,13 +160,14 @@ class OfflineCatalog implements UploadPinSink {
   Future<CachedFile> _doDownload(ChildReference ref) async {
     final remote = await _api.getFile(ref.path);
     if (remote == null) {
-      throw StorageNotFoundException('No file at "${ref.path}".');
+      throw WincheStorageException.of(WincheErrorCode.notFound, 'No file at "${ref.path}".');
     }
     // uploadStatus is the server's own statement about whether bytes exist.
     // contentHash being null is a symptom of the same thing, so key on the
     // statement rather than on the symptom.
     if (remote.uploadStatus != UploadStatus.complete) {
-      throw StorageFailedPreconditionException(
+      throw WincheStorageException.of(
+        WincheErrorCode.failedPrecondition,
         remote.uploadStatus == UploadStatus.pending
             ? 'The file at "${ref.path}" is still uploading, so there are no '
                 'bytes to cache yet. To cache a file you are uploading, use '

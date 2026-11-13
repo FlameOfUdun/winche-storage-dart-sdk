@@ -27,9 +27,9 @@ final class TransferAbort {
 }
 
 /// Whether [error] is a request abandoned through [TransferAbort].
-bool isTransferAborted(Object error) => error is WincheHttpException && error.code == WincheHttpException.aborted;
+bool isTransferAborted(Object error) => error is WincheHttpException && error.code == WincheErrorCode.cancelled;
 
 /// Whether [error] is a network failure with no answer from the server: no
 /// connection, a dropped one, or no answer in time.
 bool isTransferNetworkFailure(Object error) =>
-    error is WincheHttpException && error.status == null && error.code != WincheHttpException.aborted;
+    error is WincheHttpException && error.status == null && error.code != WincheErrorCode.cancelled;
