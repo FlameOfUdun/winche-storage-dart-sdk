@@ -651,12 +651,6 @@ final bool deleted = await photoRef.delete(); // false if nothing was there
 await storage.child('userFiles/user-123/album').delete(); // a folder: everything under it, each file rule-checked
 ```
 
-## Files in database documents
-
-With `winche_database`, a document field holding a file's path can be expanded (`expand(['file:scan'])`) and read as a
-link: `snap.link('scan')?.file` is a `FileSnapshot` (null when the user may not see it, or offline), and
-`snap.link('scan')?.fileRef` the file's `ChildReference` either way: download, cache, get a link.
-
 ## API reference
 
 ### `WincheStorageSettings`

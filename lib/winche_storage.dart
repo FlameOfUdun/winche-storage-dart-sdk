@@ -22,7 +22,6 @@ import 'src/tasks/download_task.dart';
 import 'src/tasks/upload_task.dart';
 
 export 'src/child_reference.dart' show ChildReference;
-export 'src/file_link.dart' show FileLink;
 export 'src/file_snapshot.dart' show FileSnapshot;
 export 'src/directory_snapshot.dart' show DirectorySnapshot;
 export 'src/models/file_data.dart' show FileData;
