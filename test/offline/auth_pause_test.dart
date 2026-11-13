@@ -24,7 +24,11 @@ class _FailingApi extends NoopApi {
 
   @override
   Future<FileData> setFile(String path, String mime, int size,
-          {Map<String, dynamic>? metadata}) =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) =>
       throw StorageUnavailableException('stop here');
 }
 

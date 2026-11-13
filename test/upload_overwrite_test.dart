@@ -36,13 +36,17 @@ class _UploadApi extends NoopApi {
 
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-      {Map<String, dynamic>? metadata}) async {
+      {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async {
     calls.add('setFile($sizeBytes)');
     return existing = _record(sizeBytes, mimeType, UploadStatus.pending);
   }
 
   @override
-  Future<bool> deleteFile(String path) async {
+  Future<bool> deleteFile(String path, {int? ifVersion}) async {
     calls.add('deleteFile');
     existing = null;
     parts = const [];
@@ -121,13 +125,13 @@ void main() {
       expect(api.calls, ['getFile']);
     });
 
-    test('complete + different size: delete + setFile + re-upload', () async {
+    test('complete + different size: setFile replaces + re-upload', () async {
       final api = _UploadApi()
         ..existing =
             _UploadApi()._record(10, 'image/png', UploadStatus.complete);
       await _start(api, Uint8List(3)).whenDone;
       expect(
-          api.calls, ['getFile', 'deleteFile', 'setFile(3)', 'upload', 'confirm']);
+          api.calls, ['getFile', 'setFile(3)', 'upload', 'confirm']);
     });
 
     test('incomplete + matching: re-upload whole object (no parts)', () async {
@@ -144,7 +148,7 @@ void main() {
             _UploadApi()._record(10, 'image/png', UploadStatus.pending);
       await _start(api, Uint8List(3)).whenDone;
       expect(
-          api.calls, ['getFile', 'deleteFile', 'setFile(3)', 'upload', 'confirm']);
+          api.calls, ['getFile', 'setFile(3)', 'upload', 'confirm']);
     });
   });
 

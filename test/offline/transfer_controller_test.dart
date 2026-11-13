@@ -18,7 +18,11 @@ class _FailingApi extends NoopApi {
 
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-      {Map<String, dynamic>? metadata}) async {
+      {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async {
     calls++;
     throw Exception('offline');
   }

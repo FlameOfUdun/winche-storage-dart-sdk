@@ -1,5 +1,4 @@
 enum UploadStatus {
   pending,
-  complete,
-  failed;
+  complete;
 }

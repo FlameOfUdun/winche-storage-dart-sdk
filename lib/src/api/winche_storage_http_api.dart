@@ -6,6 +6,7 @@ import 'package:winche_core/winche_core.dart';
 import '../models/download_session.dart';
 import '../models/file_part.dart';
 import '../models/file_data.dart';
+import '../models/file_list_page.dart';
 import '../models/upload_session.dart';
 import 'winche_storage_api.dart';
 import 'winche_storage_exception.dart';
@@ -35,7 +36,8 @@ final class WincheStorageHttpApi implements WincheStorageApi {
 
   Uri _url(String path, [String verb = '', Map<String, String>? query]) {
     final base = _endpoint.toString().replaceAll(RegExp(r'/+$'), '');
-    final url = Uri.parse('$base/${_encode(path)}$verb');
+    // The top folder has no path segment: POST {base}/:list.
+    final url = Uri.parse('$base/${path.isEmpty ? '' : _encode(path)}$verb');
     return query == null || query.isEmpty ? url : url.replace(queryParameters: query);
   }
 
@@ -65,8 +67,21 @@ final class WincheStorageHttpApi implements WincheStorageApi {
   Map<String, dynamic> _obj(Object? json) => json as Map<String, dynamic>;
 
   @override
-  Future<FileData> setFile(String path, String mimeType, int sizeBytes, {Map<String, dynamic>? metadata}) async =>
-      FileData.fromJson(_obj(await _send('PUT', _url(path), json: {'mimeType': mimeType, 'sizeBytes': sizeBytes, 'metadata': metadata})));
+  Future<FileData> setFile(String path, String mimeType, int sizeBytes,
+          {Map<String, dynamic>? metadata,
+          bool ifNotExists = false,
+          int? ifVersion,
+          String? contentDisposition,
+          String? cacheControl}) async =>
+      FileData.fromJson(_obj(await _send('PUT', _url(path), json: {
+        'mimeType': mimeType,
+        'sizeBytes': sizeBytes,
+        'metadata': metadata,
+        if (ifNotExists || ifVersion != null)
+          'precondition': {if (ifNotExists) 'exists': false, if (ifVersion != null) 'version': ifVersion},
+        if (contentDisposition != null) 'contentDisposition': contentDisposition,
+        if (cacheControl != null) 'cacheControl': cacheControl,
+      })));
 
   @override
   Future<FileData?> getFile(String path) async {
@@ -90,9 +105,9 @@ final class WincheStorageHttpApi implements WincheStorageApi {
   Future<FileData> confirmUpload(String path) async => FileData.fromJson(_obj(await _send('POST', _url(path, ':confirm'))));
 
   @override
-  Future<bool> deleteFile(String path) async {
+  Future<bool> deleteFile(String path, {int? ifVersion}) async {
     try {
-      await _send('DELETE', _url(path));
+      await _send('DELETE', _url(path, '', {if (ifVersion != null) 'ifVersion': '$ifVersion'}));
       return true;
     } on StorageNotFoundException {
       return false;
@@ -100,13 +115,29 @@ final class WincheStorageHttpApi implements WincheStorageApi {
   }
 
   @override
-  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata) async =>
-      FileData.fromJson(_obj(await _send('PATCH', _url(path), json: {'metadata': metadata}, idempotent: true)));
+  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata,
+          {int? ifVersion, String? contentDisposition, String? cacheControl}) async =>
+      FileData.fromJson(_obj(await _send('PATCH', _url(path),
+          json: {
+            'metadata': metadata,
+            if (contentDisposition != null) 'contentDisposition': contentDisposition,
+            if (cacheControl != null) 'cacheControl': cacheControl,
+            if (ifVersion != null) 'precondition': {'version': ifVersion},
+          },
+          // A merge is safe to repeat; one held to a version isn't (the first may have moved it on).
+          idempotent: ifVersion == null)));
 
   @override
-  Future<List<FileData>> listDirectory(String directory, {String? mimeType}) async {
-    final json = await _send('POST', _url(directory, ':list', {if (mimeType != null) 'mimeType': mimeType}), idempotent: true);
-    return (json as List<dynamic>).map((e) => FileData.fromJson(e as Map<String, dynamic>)).toList();
+  Future<FileListPage> list(String directory, {int? maxResults, String? pageToken, String? mimeType}) async {
+    final json = await _send(
+        'POST',
+        _url(directory, ':list', {
+          if (maxResults != null) 'maxResults': '$maxResults',
+          if (pageToken != null) 'pageToken': pageToken,
+          if (mimeType != null) 'mimeType': mimeType,
+        }),
+        idempotent: true);
+    return FileListPage.fromJson(_obj(json));
   }
 
   @override

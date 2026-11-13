@@ -105,12 +105,29 @@ void main() {
     expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:download');
   });
 
-  test('listDirectory -> POST /{enc}:list?mimeType=', () async {
-    final (api, reqs) = _stub([_fileJson]);
-    await api.listDirectory('userFiles/u1', mimeType: 'image/png');
+  test('list -> POST /{enc}:list?maxResults=&pageToken=&mimeType=; the top is /:list', () async {
+    final (api, reqs) = _stub({'items': [_fileJson], 'prefixes': ['userFiles/u1/sub'], 'nextPageToken': 'n'});
+    final page = await api.list('userFiles/u1', maxResults: 5, pageToken: 'p', mimeType: 'image/png');
     expect(reqs.single.method, 'POST');
     expect(_where(reqs.single), '$_baseUrl/${_enc('userFiles/u1')}:list');
-    expect(reqs.single.url.queryParameters['mimeType'], 'image/png');
+    expect(reqs.single.url.queryParameters, {'maxResults': '5', 'pageToken': 'p', 'mimeType': 'image/png'});
+    expect(page.items.single.path, 'userFiles/u1/a.png');
+    expect(page.prefixes, ['userFiles/u1/sub']);
+    expect(page.nextPageToken, 'n');
+
+    final (top, topReqs) = _stub({'items': [], 'prefixes': []});
+    await top.list('');
+    expect(_where(topReqs.single), '$_baseUrl/:list');
+  });
+
+  test('setFile sends preconditions and download headers', () async {
+    final (api, reqs) = _stub(_fileJson);
+    await api.setFile('a', 'text/plain', 1, ifNotExists: true, contentDisposition: 'attachment', cacheControl: 'no-store');
+    expect(jsonDecode(reqs.single.body), containsPair('precondition', {'exists': false}));
+    expect(jsonDecode(reqs.single.body), containsPair('contentDisposition', 'attachment'));
+    final (del, delReqs) = _stub(null);
+    await del.deleteFile('a', ifVersion: 3);
+    expect(delReqs.single.url.queryParameters['ifVersion'], '3');
   });
 
   test('listParts -> POST /{enc}:listParts', () async {

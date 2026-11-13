@@ -25,6 +25,7 @@ export 'src/child_reference.dart' show ChildReference;
 export 'src/file_snapshot.dart' show FileSnapshot;
 export 'src/directory_snapshot.dart' show DirectorySnapshot;
 export 'src/models/file_data.dart' show FileData;
+export 'src/models/file_list_page.dart' show FileListPage;
 export 'src/models/upload_session.dart' show UploadSession;
 export 'src/models/download_session.dart' show DownloadSession;
 export 'src/models/file_part.dart' show FilePart;
@@ -390,7 +391,7 @@ final class WincheStorage extends WincheService implements WincheSessionConsumer
   /// about whoever is signed in at the moment you use it, never a stale
   /// session captured when it was built.
   ChildReference child(String path) =>
-      ChildReference.bound(path: path, binding: _binding);
+      ChildReference.bound(path: ChildReference.joinPath('', path), binding: _binding);
 
   /// Re-drives every upload halted by a pause — an expired token or an
   /// unreachable server.

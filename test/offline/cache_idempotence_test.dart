@@ -142,7 +142,6 @@ void main() {
     // different situations; both used to fall through to an obscure
     // signed-URL error.
     final pending = _CountingApi(status: UploadStatus.pending);
-    final failed = _CountingApi(status: UploadStatus.failed);
 
     String messageFrom(Object e) => (e as WincheStorageException).message;
 
@@ -150,12 +149,7 @@ void main() {
             path: 'a/b.png', api: pending, catalog: build(pending).catalog)
         .keepCached()
         .then<Object?>((_) => null, onError: (Object e) => e);
-    final failedErr = await ChildReference(
-            path: 'a/b.png', api: failed, catalog: build(failed).catalog)
-        .keepCached()
-        .then<Object?>((_) => null, onError: (Object e) => e);
 
     expect(messageFrom(pendingErr!), contains('still uploading'));
-    expect(messageFrom(failedErr!), contains('re-uploaded'));
   });
 }

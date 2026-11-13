@@ -5,7 +5,11 @@ import 'package:winche_storage/winche_storage.dart';
 class NoopApi implements WincheStorageApi {
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-          {Map<String, dynamic>? metadata}) =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) =>
       throw UnimplementedError();
   @override
   Future<FileData?> getFile(String path) => throw UnimplementedError();
@@ -21,12 +25,14 @@ class NoopApi implements WincheStorageApi {
   @override
   Future<FileData> confirmUpload(String path) => throw UnimplementedError();
   @override
-  Future<bool> deleteFile(String path) => throw UnimplementedError();
+  Future<bool> deleteFile(String path, {int? ifVersion}) => throw UnimplementedError();
   @override
-  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata) =>
+  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata,
+      {int? ifVersion, String? contentDisposition, String? cacheControl}) =>
       throw UnimplementedError();
   @override
-  Future<List<FileData>> listDirectory(String directory, {String? mimeType}) =>
+  Future<FileListPage> list(String directory,
+          {int? maxResults, String? pageToken, String? mimeType}) =>
       throw UnimplementedError();
   @override
   Future<List<FilePart>> listParts(String path) => throw UnimplementedError();

@@ -277,14 +277,13 @@ abstract class UploadTask {
     return confirmed;
   }
 
-  /// Deletes any existing record/parts at the path and creates a fresh one for
-  /// the given [sizeBytes]. Used to overwrite a completed file or to discard an
-  /// abandoned attempt whose content no longer matches.
-  Future<FileData> _replaceRecord(int sizeBytes) async {
-    await reference.api.deleteFile(reference.path);
-    return reference.api
-        .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
-  }
+  /// Registers the file again for the given [sizeBytes]: the server replaces
+  /// the record in one step (the old bytes stay readable until the new upload
+  /// is confirmed) and drops any parts of an abandoned attempt. Used to
+  /// overwrite a completed file or to discard an attempt whose content no
+  /// longer matches. (Deleting first would also delete files under this path.)
+  Future<FileData> _replaceRecord(int sizeBytes) => reference.api
+      .setFile(reference.path, mimeType, sizeBytes, metadata: metadata);
 
   /// Uploads the whole file/bytes in a single signed PUT (the `:upload` path),
   /// retrying with exponential backoff. Used for files at or below the

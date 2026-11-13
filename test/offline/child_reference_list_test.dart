@@ -25,26 +25,28 @@ class _ListApi extends NoopApi {
   _ListApi(this._files);
   final List<FileData> _files;
   @override
-  Future<List<FileData>> listDirectory(String directory,
-          {String? mimeType}) async =>
-      mimeType == null
-          ? _files
-          : _files.where((d) => d.mimeType == mimeType).toList();
+  Future<FileListPage> list(String directory,
+          {int? maxResults, String? pageToken, String? mimeType}) async =>
+      FileListPage(
+          items: mimeType == null
+              ? _files
+              : _files.where((d) => d.mimeType == mimeType).toList(),
+          prefixes: const []);
 }
 
-/// listDirectory always fails as if the server is unreachable.
+/// list always fails as if the server is unreachable.
 class _OfflineListApi extends NoopApi {
   @override
-  Future<List<FileData>> listDirectory(String directory,
-          {String? mimeType}) async =>
+  Future<FileListPage> list(String directory,
+          {int? maxResults, String? pageToken, String? mimeType}) async =>
       throw StorageUnavailableException('offline');
 }
 
-/// listDirectory fails with a non-offline error.
+/// list fails with a non-offline error.
 class _ErrorListApi extends NoopApi {
   @override
-  Future<List<FileData>> listDirectory(String directory,
-          {String? mimeType}) async =>
+  Future<FileListPage> list(String directory,
+          {int? maxResults, String? pageToken, String? mimeType}) async =>
       throw StorageInternalException('boom');
 }
 

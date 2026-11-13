@@ -10,7 +10,7 @@ class _DeleteApi extends NoopApi {
   final deleted = <String>[];
 
   @override
-  Future<bool> deleteFile(String path) async {
+  Future<bool> deleteFile(String path, {int? ifVersion}) async {
     deleted.add(path);
     return true;
   }

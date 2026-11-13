@@ -6,6 +6,19 @@ On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
 
 ### Breaking
 
+- **Listing is paged, with folders.** `WincheStorageApi.list(directory, {maxResults, pageToken, mimeType})` returns a
+  `FileListPage` (`items`, `prefixes`, `nextPageToken`) and replaces `listDirectory`. `ChildReference.list()` reads a
+  page, `listChildren()` every page; `DirectorySnapshot` gains `folders` and `nextPageToken`. `storage.child('')` lists
+  the top.
+- **`updateMetadata` merges** (a null value removes a key), as the server now does, and takes `ifVersion`,
+  `contentDisposition` and `cacheControl`. `setFile` takes `ifNotExists`, `ifVersion`, `contentDisposition` and
+  `cacheControl`; `deleteFile` / `delete()` take `ifVersion`. `FileData` has `contentDisposition` and `cacheControl`.
+- **`delete()` on a path removes everything under it too** (the server's folder delete), and clears this device's
+  copies and queued uploads under it.
+- **Replacing a file no longer deletes it first**: the server replaces the record in one step, so files under the
+  path are untouched and the old bytes stay readable until the new upload is confirmed.
+- **`UploadStatus.failed` is gone** (the server never set it).
+- **Paths have one form**: `child()` drops stray slashes and refuses `.` and `..` segments, as the server does.
 - **Needs `winche_core` 1.0.** The endpoint is `/files/v1` under `WincheOptions.baseUrl` (or
   `WincheOptions.endpoints['storage']`); the server side moved to `/files/v1` in Winche.Storage. `WincheStorage` is a
   plain `WincheService` that follows the session.

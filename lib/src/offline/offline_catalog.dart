@@ -168,12 +168,9 @@ class OfflineCatalog implements UploadPinSink {
     if (remote.uploadStatus != UploadStatus.complete) {
       throw WincheStorageException.of(
         WincheErrorCode.failedPrecondition,
-        remote.uploadStatus == UploadStatus.pending
-            ? 'The file at "${ref.path}" is still uploading, so there are no '
-                'bytes to cache yet. To cache a file you are uploading, use '
-                'uploadPath(..., cache: true).'
-            : 'The upload for "${ref.path}" failed, so the server has no bytes '
-                'to serve. It must be re-uploaded before it can be cached.',
+        'The file at "${ref.path}" is still uploading, so there are no '
+        'bytes to cache yet. To cache a file you are uploading, use '
+        'uploadPath(..., cache: true).',
       );
     }
 

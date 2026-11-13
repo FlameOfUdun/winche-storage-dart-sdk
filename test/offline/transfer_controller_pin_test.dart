@@ -26,7 +26,11 @@ class _PinApi extends NoopApi {
   Future<FileData?> getFile(String path) async => _existing;
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _existing = _rec(sizeBytes, UploadStatus.pending);
   @override
   Future<UploadSession> generateFileUploadUrl(String path) async =>

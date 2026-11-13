@@ -4,6 +4,7 @@ import 'package:mime/mime.dart';
 
 import 'api/winche_storage_api.dart';
 import 'directory_snapshot.dart';
+import 'models/file_data.dart';
 import 'file_snapshot.dart';
 import 'offline/cache_status.dart';
 import 'offline/cached_file.dart';
@@ -120,8 +121,24 @@ final class ChildReference {
     return _withPath(path.substring(0, i));
   }
 
-  /// Returns a new [ChildReference] for a child path.
-  ChildReference child(String path) => _withPath('${this.path}/$path');
+  /// Returns a new [ChildReference] for a child path: `a/b`, with stray slashes
+  /// dropped (`a//b/` is `a/b`). Throws [ArgumentError] for a `.` or `..`
+  /// segment.
+  ChildReference child(String path) => _withPath(joinPath(this.path, path));
+
+  /// [base] and [relative] joined into the one form of a path the server
+  /// accepts: segments separated by single slashes, no empty, `.` or `..` ones.
+  static String joinPath(String base, String relative) {
+    final segments =
+        '$base/$relative'.split('/').where((s) => s.isNotEmpty).toList();
+    for (final s in segments) {
+      if (s == '.' || s == '..') {
+        throw ArgumentError.value(
+            relative, 'path', "A path can't have '.' or '..' segments");
+      }
+    }
+    return segments.join('/');
+  }
 
   /// Fetches the file's record from the server, annotated with whether this
   /// device has its bytes cached.
@@ -154,7 +171,32 @@ final class ChildReference {
   /// [cachedFiles].
   Future<DirectorySnapshot> listChildren({String? mimeType}) async {
     final timestamp = DateTime.now();
-    final files = await api.listDirectory(path, mimeType: mimeType);
+    final files = <FileData>[];
+    final folders = <String>[];
+    String? token;
+    do {
+      final page = await api.list(path, pageToken: token, mimeType: mimeType);
+      files.addAll(page.items);
+      folders.addAll(page.prefixes);
+      token = page.nextPageToken;
+    } while (token != null);
+    return _snapshot(files, folders, null, timestamp);
+  }
+
+  /// One page of this folder, as Firebase's `list()`: at most [maxResults]
+  /// files and sub-folders (server default and cap 1,000) in name order, from
+  /// [pageToken] (the previous page's `nextPageToken`). [listChildren] reads
+  /// every page.
+  Future<DirectorySnapshot> list(
+      {int? maxResults, String? pageToken, String? mimeType}) async {
+    final timestamp = DateTime.now();
+    final page = await api.list(path,
+        maxResults: maxResults, pageToken: pageToken, mimeType: mimeType);
+    return _snapshot(page.items, page.prefixes, page.nextPageToken, timestamp);
+  }
+
+  Future<DirectorySnapshot> _snapshot(List<FileData> files,
+      List<String> folders, String? nextPageToken, DateTime timestamp) async {
     // One bulk catalog read for the whole listing, rather than a filesystem
     // check per file. Advisory by design: this renders a badge. [cachedFile] is
     // the authoritative check, because it hands out a path someone will open.
@@ -174,7 +216,10 @@ final class ChildReference {
       );
     }).toList();
     return DirectorySnapshot.fromFiles(snapshots,
-        reference: this, timestamp: timestamp);
+        reference: this,
+        timestamp: timestamp,
+        folders: [for (final f in folders) _withPath(f)],
+        nextPageToken: nextPageToken);
   }
 
   ChildReference _childRef(String fullPath) => _withPath(fullPath);
@@ -298,16 +343,23 @@ final class ChildReference {
   DownloadTask download(String saveTo) => _trackDownload(
       DownloadTask.start(reference: this, saveTo: saveTo, httpClient: _binding?.transfers));
 
-  /// Updates metadata on the server. Throws `StorageNotFoundException` when the
-  /// file does not exist. When this file is cached, its cached metadata is
+  /// Merges [metadata] into the file's metadata on the server: each key is set,
+  /// and a null value removes it. [contentDisposition] and [cacheControl]
+  /// change how downloads are served (`''` clears one); [ifVersion] only
+  /// updates the file at that version. Throws `StorageNotFoundException` when
+  /// the file does not exist. When this file is cached, its cached metadata is
   /// updated too (content fingerprint preserved) — runs only after the server
   /// write succeeds.
   ///
   /// The returned snapshot is annotated with this device's cache state, like
   /// [getSnapshot] — read from the row the sync just wrote, so it costs no
   /// extra lookup.
-  Future<FileSnapshot> updateMetadata(Map<String, dynamic> metadata) async {
-    final updatedData = await api.updateMetadata(path, metadata);
+  Future<FileSnapshot> updateMetadata(Map<String, dynamic> metadata,
+      {int? ifVersion, String? contentDisposition, String? cacheControl}) async {
+    final updatedData = await api.updateMetadata(path, metadata,
+        ifVersion: ifVersion,
+        contentDisposition: contentDisposition,
+        cacheControl: cacheControl);
     final row = await catalog?.syncMetadata(path, updatedData.metadata);
     final cached = row != null && row.status == CatalogStatus.ready;
     return FileSnapshot.fromData(
@@ -318,16 +370,25 @@ final class ChildReference {
     );
   }
 
-  /// Deletes from the server. Returns true if a file was deleted.
+  /// Deletes from the server the file at this path and every file under it
+  /// (like a database document with its subcollections). [ifVersion] only
+  /// deletes the file at that version. Returns true if anything was deleted.
   ///
   /// Also cleans up local state once the server delete succeeds, so a deleted
   /// file never leaves an orphan behind: drops any cached copy (local file +
-  /// catalog row) and any queued upload for this path. No-ops when neither the
-  /// cache nor the queue is configured.
-  Future<bool> delete() async {
-    final deleted = await api.deleteFile(path);
-    await catalog?.evict(path);
-    await controller?.removePath(path);
+  /// catalog row) and any queued upload for this path and under it. No-ops
+  /// when neither the cache nor the queue is configured.
+  Future<bool> delete({int? ifVersion}) async {
+    final deleted = await api.deleteFile(path, ifVersion: ifVersion);
+    final under = [
+      path,
+      for (final e in await catalog?.all() ?? const <CatalogEntry>[])
+        if (e.path.startsWith('$path/')) e.path,
+    ];
+    for (final p in under) {
+      await catalog?.evict(p);
+      await controller?.removePath(p);
+    }
     return deleted;
   }
 

@@ -582,9 +582,25 @@ final DirectorySnapshot dir = await storage.child('userFiles/user-123').listChil
 for (final snapshot in dir.files) {
   print('${snapshot.reference.path} — ${snapshot.data?.sizeBytes} bytes');
 }
+for (final folder in dir.folders) {
+  print('${folder.path}/');
+}
 ```
 
-`listChildren()` is a server read — it throws a `WincheStorageException` with code `unavailable` when
+`listChildren()` reads every page; `list()` reads one, as Firebase's `list()`: at most `maxResults` files and
+folders in name order, and `nextPageToken` for the next page.
+
+```dart
+var page = await storage.child('userFiles/user-123').list(maxResults: 100);
+while (page.nextPageToken != null) {
+  page = await storage.child('userFiles/user-123').list(maxResults: 100, pageToken: page.nextPageToken);
+}
+```
+
+`storage.child('')` lists the top. Paths have one form: `child()` drops stray slashes (`a//b/` is `a/b`) and refuses
+`.` and `..` segments.
+
+`listChildren()` and `list()` are server reads — it throws a `WincheStorageException` with code `unavailable` when
 offline, since listings are never cached. Each returned `FileSnapshot` carries
 `isCached` / `localPath` for this device, so one call tells you both what exists
 and what you already hold (see [File cache](#file-cache)).
@@ -607,7 +623,9 @@ if (snapshot.exists) {
   print(data.directory);
   print(data.mimeType);
   print(data.sizeBytes);
-  print(data.uploadStatus); // UploadStatus.pending | .complete | .failed
+  print(data.uploadStatus); // UploadStatus.pending | .complete
+  print(data.contentDisposition); // how downloads are offered, if set
+  print(data.cacheControl);       // how long downloads may be cached, if set
   print(data.metadata);
   print(data.version);
   print(data.createdAt);
@@ -618,13 +636,19 @@ if (snapshot.exists) {
 ### Update metadata
 
 ```dart
-final FileSnapshot updated = await photoRef.updateMetadata({'label': 'hero'});
+// Merges: sets label, removes draft, leaves other keys. Optionally changes download headers ('' clears one).
+final FileSnapshot updated = await photoRef.updateMetadata(
+  {'label': 'hero', 'draft': null},
+  cacheControl: 'public, max-age=3600',
+  ifVersion: snapshot.data!.version, // only if nobody changed it since
+);
 ```
 
 ### Delete
 
 ```dart
-final bool deleted = await photoRef.delete(); // false if the file didn't exist
+final bool deleted = await photoRef.delete(); // false if nothing was there
+await storage.child('userFiles/user-123/album').delete(); // a folder: everything under it, each file rule-checked
 ```
 
 ## API reference
