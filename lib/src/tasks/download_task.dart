@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dio/dio.dart';
+import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
+import 'transfer_http.dart';
 
 enum DownloadTaskStatus {
   queued,
@@ -38,7 +39,7 @@ abstract class DownloadTask {
 
   final int maxRetries;
   final Duration retryBaseDelay;
-  final Dio _httpClient;
+  final WincheHttp _httpClient;
 
   /// Sent as `If-Range` alongside a range request, so a server that has since
   /// overwritten the object answers with the whole body (HTTP 200) instead of
@@ -59,7 +60,7 @@ abstract class DownloadTask {
   final _stateController = StreamController<DownloadTaskState>.broadcast();
   final _taskCompleter = Completer<void>();
 
-  CancelToken? _cancelToken;
+  TransferAbort? _cancelToken;
   DownloadTaskState _state;
 
   DownloadTaskState get state => _state;
@@ -71,7 +72,7 @@ abstract class DownloadTask {
     required this.saveTo,
     required this.maxRetries,
     required this.retryBaseDelay,
-    required Dio httpClient,
+    required WincheHttp httpClient,
     required DownloadTaskStatus initialStatus,
     this.ifRangeEtag,
   })  : _httpClient = httpClient,
@@ -89,12 +90,11 @@ abstract class DownloadTask {
     required String saveTo,
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
-    Dio? httpClient,
+    WincheHttp? httpClient,
     bool isResume = false,
     String? ifRangeEtag,
   }) {
-    final client = httpClient ??
-        Dio(BaseOptions(validateStatus: (status) => status != null));
+    final client = httpClient ?? defaultTransferHttp;
 
     final task = _DirectDownloadTask._(
       reference: reference,
@@ -117,51 +117,48 @@ abstract class DownloadTask {
         isResume && await file.exists() ? await file.length() : 0;
 
     final headers = existingBytes > 0
-        ? <String, dynamic>{
+        ? <String, String>{
             'Range': 'bytes=$existingBytes-',
             // Belt to the contentHash guard's braces: if the object changed,
             // the server answers 200 with the whole body and the 206/200 branch
             // below truncates instead of appending.
-            if (ifRangeEtag != null) 'If-Range': ifRangeEtag,
+            if (ifRangeEtag case final etag?) 'If-Range': etag,
           }
-        : <String, dynamic>{};
+        : <String, String>{};
 
-    final response = await _httpClient.get<ResponseBody>(
-      session.url,
-      options: Options(
-        responseType: ResponseType.stream,
+    final WincheStreamedResponse response;
+    try {
+      response = await _httpClient.stream(WincheRequest.get(
+        Uri.parse(session.url),
         headers: headers,
-        validateStatus: (s) => s != null,
-      ),
-      cancelToken: _cancelToken,
-    );
-
-    final code = response.statusCode ?? 0;
-
-    if (code == 416) {
-      final record = await reference.api.getFile(reference.path);
-      if (record != null && existingBytes >= record.sizeBytes) {
-        _setProgress(1.0);
-        _setStatus(DownloadTaskStatus.complete);
-        _completeTask();
-        return;
-      }
-      throw Exception(
-          'Range not satisfiable (HTTP 416) for "${reference.path}"');
+        auth: WincheRequestAuth.none,
+        // Tries are this task's to count, with its own backoff.
+        idempotent: false,
+        timeout: const Duration(minutes: 2),
+        abortTrigger: _cancelToken?.trigger,
+        service: 'storage',
+      ));
+    } on WincheHttpException catch (e) {
+      final status = e.status;
+      if (status == null) rethrow;
+      if (status != 416) throw Exception('Download failed: HTTP $status');
+      await _settleUnsatisfiableRange(existingBytes);
+      return;
     }
+
+    final code = response.status;
 
     if (code != 200 && code != 206) {
       throw Exception('Download failed: HTTP $code');
     }
 
-    final contentLength = int.tryParse(
-          response.headers.value(Headers.contentLengthHeader) ?? '',
-        ) ??
+    final contentLength = response.contentLength ??
+        int.tryParse(response.headers['content-length'] ?? '') ??
         -1;
 
     // Captured for the next resume's If-Range. Recorded before any bytes are
     // written so it always describes the body being received.
-    _observedEtag = response.headers.value('etag') ?? _observedEtag;
+    _observedEtag = response.headers['etag'] ?? _observedEtag;
 
     final isPartial = code == 206;
 
@@ -176,11 +173,10 @@ abstract class DownloadTask {
       _setProgress(bytesWritten / totalBytes);
     }
 
-    final body = response.data as ResponseBody;
     final sink = await file.open(mode: writeMode);
 
     try {
-      await for (final chunk in body.stream) {
+      await for (final chunk in response.body) {
         if (!_isRunning) return;
         await sink.writeFrom(chunk);
         bytesWritten += chunk.length;
@@ -209,6 +205,18 @@ abstract class DownloadTask {
     _completeTask();
   }
 
+  /// A 416: the partial on disk may already be the whole file.
+  Future<void> _settleUnsatisfiableRange(int existingBytes) async {
+    final record = await reference.api.getFile(reference.path);
+    if (record != null && existingBytes >= record.sizeBytes) {
+      _setProgress(1.0);
+      _setStatus(DownloadTaskStatus.complete);
+      _completeTask();
+      return;
+    }
+    throw Exception('Range not satisfiable (HTTP 416) for "${reference.path}"');
+  }
+
   /// Pauses the download mid-flight.
   void pause() {
     if (_state.status != DownloadTaskStatus.running) {
@@ -217,7 +225,7 @@ abstract class DownloadTask {
     }
     _setStatus(DownloadTaskStatus.paused);
 
-    _cancelToken?.cancel('paused');
+    _cancelToken?.abort();
     _cancelToken = null;
   }
 
@@ -235,7 +243,7 @@ abstract class DownloadTask {
   /// Cancels in-flight HTTP without touching status or completion. Shared by
   /// the two [abortForClose] implementations.
   void _abortInFlight() {
-    _cancelToken?.cancel('closed');
+    _cancelToken?.abort();
     _cancelToken = null;
   }
 
@@ -247,7 +255,7 @@ abstract class DownloadTask {
     }
     _setStatus(DownloadTaskStatus.cancelled);
 
-    _cancelToken?.cancel('cancelled');
+    _cancelToken?.abort();
     _cancelToken = null;
 
     _setProgress(0.0);
@@ -320,15 +328,19 @@ class _DirectDownloadTask extends DownloadTask {
 
   Future<void> _run({bool isResume = false}) async {
     _setStatus(DownloadTaskStatus.running);
-    _cancelToken = CancelToken();
+    _cancelToken = TransferAbort();
 
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         await _attempt(isResume: isResume);
         return;
-      } on DioException catch (e, st) {
-        if (e.type == DioExceptionType.cancel) return;
+      } on WincheHttpException catch (e, st) {
+        if (isTransferAborted(e)) return;
         if (!_isRunning) return;
+        if (!isTransferNetworkFailure(e)) {
+          await _handleFailure(e, st);
+          return;
+        }
 
         if (attempt == maxRetries) {
           await _handleFailure(e, st);
@@ -338,7 +350,7 @@ class _DirectDownloadTask extends DownloadTask {
         final delay = retryBaseDelay * (1 << attempt);
         await Future<void>.delayed(delay);
         if (!_isRunning) return;
-        _cancelToken = CancelToken();
+        _cancelToken = TransferAbort();
       } catch (e, st) {
         if (!_isRunning) return;
         await _handleFailure(e, st);

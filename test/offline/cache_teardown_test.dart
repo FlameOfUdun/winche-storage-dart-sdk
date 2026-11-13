@@ -65,7 +65,7 @@ void main() {
     final app = WincheApp(
       'cache-teardown',
       options: WincheOptions(
-        storageEndpoint: Uri.parse('http://127.0.0.1:1/f'),
+        endpoints: {'storage': Uri.parse('http://127.0.0.1:1/f')},
         directoryResolver: () async => tmp.path,
       ),
     );

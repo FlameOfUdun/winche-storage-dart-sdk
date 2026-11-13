@@ -7,7 +7,7 @@ import 'dart:typed_data';
 import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 
-final class _TokenAuth extends WincheAuthService {
+final class _TokenAuth extends WincheService with WincheIdentitySource {
   _TokenAuth(super.app, this.token) {
     notifyIdentityChanged(activeIdentity);
   }
@@ -20,7 +20,7 @@ final class _TokenAuth extends WincheAuthService {
 
 Future<void> main(List<String> args) async {
   final target = args.length > 1 ? args[1] : 'localhost:9090';
-  final options = WincheOptions(storageEndpoint: Uri.parse('http://$target/files'));
+  final options = WincheOptions(endpoints: {'storage': Uri.parse('http://$target/files/v1')});
 
   // Signed in: put a public file.
   final writer = WincheApp('writer', options: options);

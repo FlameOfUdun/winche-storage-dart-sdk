@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
+import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_api.dart';
 import '../api/winche_storage_exception.dart';
@@ -30,7 +30,7 @@ class OfflineCatalog implements UploadPinSink {
     required Future<String> Function()? directoryResolver,
     int multipartThreshold = 5 * 1024 * 1024, // accepted for API symmetry; downloads don't use it
     LiveTaskRegistry? registry,
-    Dio? httpClient,
+    WincheHttp? httpClient,
   })  : _api = api,
         _store = store,
         _directoryResolver = directoryResolver,
@@ -50,7 +50,7 @@ class OfflineCatalog implements UploadPinSink {
   /// partial plus a whole second copy.
   final LiveTaskRegistry? _registry;
 
-  final Dio? _httpClient;
+  final WincheHttp? _httpClient;
 
   /// In-flight downloads keyed by path — de-dups concurrent cache/refresh calls.
   final Map<String, Future<CachedFile>> _activePins = {};

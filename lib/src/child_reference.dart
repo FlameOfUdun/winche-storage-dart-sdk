@@ -225,6 +225,7 @@ final class ChildReference {
       );
     }
     return _trackUpload(UploadTask.start(
+      httpClient: _binding?.transfers,
       reference: this,
       localPath: localPath,
       mimeType: resolvedMime,
@@ -273,6 +274,7 @@ final class ChildReference {
           'directoryResolver or inMemory.');
     }
     return _trackUpload(UploadTask.startFromBytes(
+      httpClient: _binding?.transfers,
       reference: this,
       bytes: bytes,
       mimeType: mimeType,
@@ -294,7 +296,7 @@ final class ChildReference {
   /// `stateStream`, and `WincheStorage.downloadFor(path)` finds it again if the
   /// handle is lost.
   DownloadTask download(String saveTo) => _trackDownload(
-      DownloadTask.start(reference: this, saveTo: saveTo));
+      DownloadTask.start(reference: this, saveTo: saveTo, httpClient: _binding?.transfers));
 
   /// Updates metadata on the server. Throws `StorageNotFoundException` when the
   /// file does not exist. When this file is cached, its cached metadata is

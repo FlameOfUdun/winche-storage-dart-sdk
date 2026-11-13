@@ -1,7 +1,7 @@
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/src/offline/transfer_failure.dart';
 import 'package:winche_storage/winche_storage.dart';
 
@@ -66,37 +66,19 @@ void main() {
   });
 
   group('errors from the byte transfer (presigned PUT)', () {
-    final options = RequestOptions(path: 'https://bucket/obj');
-    DioException dio(DioExceptionType type, [Object? cause, int? status]) =>
-        DioException(
-          requestOptions: options,
-          type: type,
-          error: cause,
-          response: status == null
-              ? null
-              : Response(requestOptions: options, statusCode: status),
-        );
-
     test('a lost network pauses instead of spending attempts', () {
-      for (final e in [
-        dio(DioExceptionType.connectionError),
-        dio(DioExceptionType.connectionTimeout),
-        dio(DioExceptionType.sendTimeout),
-        dio(DioExceptionType.receiveTimeout),
-        dio(DioExceptionType.unknown,
-            const SocketException('Connection reset by peer')),
+      for (final e in <Object>[
+        const WincheHttpException(WincheHttpException.unavailable, 'connection refused'),
+        const WincheHttpException(WincheHttpException.timeout, 'no answer'),
         const SocketException('Network is unreachable'),
       ]) {
-        expect(classifyTransferFailure(e), TransferFailureClass.pause,
-            reason: '$e');
+        expect(classifyTransferFailure(e), TransferFailureClass.pause, reason: '$e');
       }
     });
 
     test('an HTTP error from the bucket is retried with a fresh session', () {
-      expect(classifyTransferFailure(dio(DioExceptionType.badResponse, null, 403)),
-          TransferFailureClass.retry);
-      expect(classifyTransferFailure(dio(DioExceptionType.badResponse, null, 503)),
-          TransferFailureClass.retry);
+      expect(classifyTransferFailure(const WincheHttpException('http-403', 'expired', status: 403)), TransferFailureClass.retry);
+      expect(classifyTransferFailure(const WincheHttpException('http-503', 'busy', status: 503)), TransferFailureClass.retry);
     });
   });
 }

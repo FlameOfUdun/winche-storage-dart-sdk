@@ -37,7 +37,7 @@ void main() async {
 
   Winche.initializeApp(
     options: WincheOptions(
-      storageEndpoint: Uri.parse('http://localhost:5209/files'),
+      baseUrl: Uri.parse('http://localhost:9090'),   // `winche emulators start`
       // Enables both the durable transfer queue (auto-resume) and the offline
       // cache. Every Winche package creates its state under this one root,
       // each in a subdirectory scoped to the signed-in identity.

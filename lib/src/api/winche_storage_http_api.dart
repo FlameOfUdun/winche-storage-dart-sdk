@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:dio/dio.dart';
+
+import 'package:winche_core/winche_core.dart';
 
 import '../models/download_session.dart';
 import '../models/file_part.dart';
@@ -11,66 +12,66 @@ import 'winche_storage_exception.dart';
 
 /// Default HTTP implementation of [WincheStorageApi] for the WincheStorage REST
 /// backend. Paths are base64Url-encoded; custom operations are AIP-136 colon-verbs
-/// (`POST /{enc}:upload`, etc.). Provide [tokenProvider] for `Authorization: Bearer` auth.
+/// (`POST /{enc}:upload`, etc.).
+///
+/// Requests go through [WincheHttp] (usually `app.http`): with a [session] they
+/// carry its token, refreshed once when refused, and fail with
+/// [WincheSessionExpired] once that session has ended; without one they carry
+/// none. Lookups and other requests that are safe to repeat are retried on
+/// network errors and 502/503/504.
 final class WincheStorageHttpApi implements WincheStorageApi {
-  final String _baseUrl;
-  final FutureOr<String> Function()? _tokenProvider;
-  final Dio _httpClient;
+  final Uri _endpoint;
+  final WincheHttp _http;
+  final WincheSession? _session;
 
-  WincheStorageHttpApi({
-    required String baseUrl,
-    FutureOr<String> Function()? tokenProvider,
-    Dio? httpClient,
-  })  : _baseUrl = baseUrl,
-        _tokenProvider = tokenProvider,
-        _httpClient = httpClient ??
-            Dio(BaseOptions(
-              baseUrl: baseUrl,
-              headers: {'content-type': 'application/json'},
-            ));
+  /// An API at [endpoint] (e.g. `https://api.example.com/files/v1`) sending
+  /// through [http] as [session], or signed out without one.
+  WincheStorageHttpApi({required Uri endpoint, required WincheHttp http, WincheSession? session})
+      : _endpoint = endpoint,
+        _http = http,
+        _session = session;
 
   String _encode(String path) => base64Url.encode(utf8.encode(path));
 
-  Future<Map<String, String>> _headers() async {
-    final token = await _tokenProvider?.call();
-    return {
-      'content-type': 'application/json',
-      if (token != null) 'Authorization': 'Bearer $token',
-    };
+  Uri _url(String path, [String verb = '', Map<String, String>? query]) {
+    final base = _endpoint.toString().replaceAll(RegExp(r'/+$'), '');
+    final url = Uri.parse('$base/${_encode(path)}$verb');
+    return query == null || query.isEmpty ? url : url.replace(queryParameters: query);
   }
 
-  Future<T> _guard<T>(Future<T> Function() action) async {
+  Future<Object?> _send(String method, Uri url, {Object? json, bool? idempotent}) async {
     try {
-      return await action();
-    } on DioException catch (e) {
-      throw _mapDioException(e);
+      final response = await _http.send(WincheRequest(
+        method,
+        url,
+        json: json,
+        auth: _session == null ? WincheRequestAuth.none : WincheRequestAuth.required,
+        session: _session,
+        idempotent: idempotent,
+        service: 'storage',
+      ));
+      try {
+        return response.json;
+      } on FormatException {
+        return null;
+      }
+    } on WincheUnboundException {
+      throw const StorageUnauthenticatedException('No auth token available for the current session.', {'statusCode': 401});
+    } on WincheHttpException catch (e) {
+      throw _map(e);
     }
   }
 
-  WincheStorageException _mapDioException(DioException e) {
-    switch (e.type) {
-      case DioExceptionType.connectionTimeout:
-      case DioExceptionType.sendTimeout:
-      case DioExceptionType.receiveTimeout:
-      case DioExceptionType.transformTimeout:
-        return const StorageDeadlineExceededException(
-            'Request timed out', {'statusCode': 408});
-      case DioExceptionType.connectionError:
-      case DioExceptionType.badCertificate:
-        return StorageUnavailableException(
-            e.message ?? 'Connection error', const {'statusCode': 503});
-      case DioExceptionType.cancel:
-        return const StorageCancelledException(
-            'Request was cancelled', {'statusCode': 499});
-      case DioExceptionType.badResponse:
-        final code = e.response?.statusCode ?? 500;
-        final message = _messageFrom(e.response) ?? 'Request failed';
-        return WincheStorageException.fromStatus(
-            _statusFromHttp(code), message, {'statusCode': code});
-      case DioExceptionType.unknown:
-        return StorageUnknownException(
-            e.message ?? 'Unknown error', const {'statusCode': -1});
+  WincheStorageException _map(WincheHttpException e) {
+    final status = e.status;
+    if (status == null) {
+      return switch (e.code) {
+        WincheHttpException.timeout => const StorageDeadlineExceededException('Request timed out', {'statusCode': 408}),
+        WincheHttpException.aborted => const StorageCancelledException('Request was cancelled', {'statusCode': 499}),
+        _ => StorageUnavailableException(e.message, const {'statusCode': 503}),
+      };
     }
+    return WincheStorageException.fromStatus(_statusFromHttp(status), e.message, {'statusCode': status});
   }
 
   StorageErrorStatus _statusFromHttp(int code) {
@@ -88,148 +89,64 @@ final class WincheStorageHttpApi implements WincheStorageApi {
       case 412:
         return StorageErrorStatus.failedPrecondition;
       default:
-        return code >= 500
-            ? StorageErrorStatus.internal
-            : StorageErrorStatus.unknown;
+        return code >= 500 ? StorageErrorStatus.internal : StorageErrorStatus.unknown;
     }
   }
 
-  String? _messageFrom(Response? res) {
-    final data = res?.data;
-    if (data is Map && data['error'] is String) return data['error'] as String;
-    if (data is String && data.isNotEmpty) return data;
-    return null;
-  }
+  Map<String, dynamic> _obj(Object? json) => json as Map<String, dynamic>;
 
   @override
-  Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-      {Map<String, dynamic>? metadata}) {
-    return _guard(() async {
-      final res = await _httpClient.put(
-        '$_baseUrl/${_encode(path)}',
-        options: Options(headers: await _headers()),
-        data: jsonEncode({
-          'mimeType': mimeType,
-          'sizeBytes': sizeBytes,
-          'metadata': metadata
-        }),
-      );
-      return FileData.fromJson(res.data as Map<String, dynamic>);
-    });
-  }
+  Future<FileData> setFile(String path, String mimeType, int sizeBytes, {Map<String, dynamic>? metadata}) async =>
+      FileData.fromJson(_obj(await _send('PUT', _url(path), json: {'mimeType': mimeType, 'sizeBytes': sizeBytes, 'metadata': metadata})));
 
   @override
   Future<FileData?> getFile(String path) async {
     try {
-      return await _guard(() async {
-        final res = await _httpClient.get(
-          '$_baseUrl/${_encode(path)}',
-          options: Options(headers: await _headers()),
-        );
-        if (res.data == null) return null;
-        return FileData.fromJson(res.data as Map<String, dynamic>);
-      });
+      final json = await _send('GET', _url(path));
+      return json == null ? null : FileData.fromJson(_obj(json));
     } on StorageNotFoundException {
       return null;
     }
   }
 
   @override
-  Future<UploadSession> generateFileUploadUrl(String path) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(path)}:upload',
-        options: Options(headers: await _headers()),
-      );
-      return UploadSession.fromJson(res.data as Map<String, dynamic>);
-    });
-  }
+  Future<UploadSession> generateFileUploadUrl(String path) async =>
+      UploadSession.fromJson(_obj(await _send('POST', _url(path, ':upload'), idempotent: true)));
 
   @override
-  Future<DownloadSession> generateDownloadUrl(String path) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(path)}:download',
-        options: Options(headers: await _headers()),
-      );
-      return DownloadSession.fromJson(res.data as Map<String, dynamic>);
-    });
-  }
+  Future<DownloadSession> generateDownloadUrl(String path) async =>
+      DownloadSession.fromJson(_obj(await _send('POST', _url(path, ':download'), idempotent: true)));
 
   @override
-  Future<FileData> confirmUpload(String path) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(path)}:confirm',
-        options: Options(headers: await _headers()),
-      );
-      return FileData.fromJson(res.data as Map<String, dynamic>);
-    });
-  }
+  Future<FileData> confirmUpload(String path) async => FileData.fromJson(_obj(await _send('POST', _url(path, ':confirm'))));
 
   @override
   Future<bool> deleteFile(String path) async {
     try {
-      return await _guard(() async {
-        await _httpClient.delete(
-          '$_baseUrl/${_encode(path)}',
-          options: Options(headers: await _headers()),
-        );
-        return true;
-      });
+      await _send('DELETE', _url(path));
+      return true;
     } on StorageNotFoundException {
       return false;
     }
   }
 
   @override
-  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata) {
-    return _guard(() async {
-      final res = await _httpClient.patch(
-        '$_baseUrl/${_encode(path)}',
-        options: Options(headers: await _headers()),
-        data: jsonEncode({'metadata': metadata}),
-      );
-      return FileData.fromJson(res.data as Map<String, dynamic>);
-    });
+  Future<FileData> updateMetadata(String path, Map<String, dynamic> metadata) async =>
+      FileData.fromJson(_obj(await _send('PATCH', _url(path), json: {'metadata': metadata}, idempotent: true)));
+
+  @override
+  Future<List<FileData>> listDirectory(String directory, {String? mimeType}) async {
+    final json = await _send('POST', _url(directory, ':list', {if (mimeType != null) 'mimeType': mimeType}), idempotent: true);
+    return (json as List<dynamic>).map((e) => FileData.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   @override
-  Future<List<FileData>> listDirectory(String directory, {String? mimeType}) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(directory)}:list',
-        queryParameters: {if (mimeType != null) 'mimeType': mimeType},
-        options: Options(headers: await _headers()),
-      );
-      return (res.data as List<dynamic>)
-          .map((e) => FileData.fromJson(e as Map<String, dynamic>))
-          .toList();
-    });
+  Future<List<FilePart>> listParts(String path) async {
+    final json = await _send('POST', _url(path, ':listParts'), idempotent: true);
+    return (json as List<dynamic>).map((e) => FilePart.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   @override
-  Future<List<FilePart>> listParts(String path) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(path)}:listParts',
-        options: Options(headers: await _headers()),
-      );
-      return (res.data as List<dynamic>)
-          .map((e) => FilePart.fromJson(e as Map<String, dynamic>))
-          .toList();
-    });
-  }
-
-  @override
-  Future<UploadSession> generatePartUploadUrl(String path, int partNumber) {
-    return _guard(() async {
-      final res = await _httpClient.post(
-        '$_baseUrl/${_encode(path)}:signPart',
-        options: Options(headers: await _headers()),
-        data: jsonEncode({'partNumber': partNumber}),
-      );
-      return UploadSession.fromJson(res.data as Map<String, dynamic>);
-    });
-  }
+  Future<UploadSession> generatePartUploadUrl(String path, int partNumber) async =>
+      UploadSession.fromJson(_obj(await _send('POST', _url(path, ':signPart'), json: {'partNumber': partNumber}, idempotent: true)));
 }

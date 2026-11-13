@@ -28,10 +28,10 @@ import 'dart:typed_data';
 import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 
-const _defaultBase = 'http://localhost:5209/files';
+const _defaultBase = 'http://localhost:5209/files/v1';
 
 /// Auth whose token *is* the uid, matching the sample server's claim mapping.
-final class SmokeAuth extends WincheAuthService {
+final class SmokeAuth extends WincheService with WincheIdentitySource {
   SmokeAuth(super.app);
 
   WincheIdentity? _identity;
@@ -86,7 +86,7 @@ Future<void> main(List<String> args) async {
 
   Winche.initializeApp(
     options: WincheOptions(
-      storageEndpoint: Uri.parse(base),
+      endpoints: {'storage': Uri.parse(base)},
       directoryResolver: () async => dir.path,
     ),
   );

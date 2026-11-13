@@ -1,27 +1,31 @@
-import 'package:dio/dio.dart';
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 
-const _baseUrl = 'https://api.test/files';
+final _endpoint = Uri.parse('https://api.test/files/v1');
 
-WincheStorageHttpApi _fail(
-    {int? statusCode,
-    Object? data,
-    DioExceptionType type = DioExceptionType.badResponse}) {
-  final dio = Dio(BaseOptions(baseUrl: _baseUrl));
-  dio.interceptors.add(InterceptorsWrapper(
-    onRequest: (options, handler) {
-      handler.reject(DioException(
-        requestOptions: options,
-        type: type,
-        response: statusCode == null
-            ? null
-            : Response(
-                requestOptions: options, statusCode: statusCode, data: data),
-      ));
-    },
-  ));
-  return WincheStorageHttpApi(baseUrl: _baseUrl, httpClient: dio);
+enum _Failure { timeout, connection }
+
+WincheStorageHttpApi _fail({int? statusCode, Object? data, _Failure? type}) {
+  final client = MockClient((request) async {
+    switch (type) {
+      case _Failure.timeout:
+        return Completer<http.Response>().future;
+      case _Failure.connection:
+        throw http.ClientException('connection refused', request.url);
+      case null:
+        return http.Response(data == null ? '' : jsonEncode(data), statusCode!);
+    }
+  });
+  final transport = WincheHttp.standalone(client: client)
+    ..retryDelay = Duration.zero
+    ..timeout = const Duration(milliseconds: 20);
+  return WincheStorageHttpApi(endpoint: _endpoint, http: transport);
 }
 
 void main() {
@@ -54,13 +58,13 @@ void main() {
   });
 
   test('receive timeout -> StorageDeadlineExceededException', () {
-    final api = _fail(type: DioExceptionType.receiveTimeout);
+    final api = _fail(type: _Failure.timeout);
     expect(() => api.getFile('a'),
         throwsA(isA<StorageDeadlineExceededException>()));
   });
 
   test('connection error -> StorageUnavailableException', () {
-    final api = _fail(type: DioExceptionType.connectionError);
+    final api = _fail(type: _Failure.connection);
     expect(() => api.confirmUpload('a'),
         throwsA(isA<StorageUnavailableException>()));
   });

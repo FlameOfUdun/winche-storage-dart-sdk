@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
+import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_exception.dart';
 import '../child_reference.dart';
@@ -10,6 +10,7 @@ import '../file_snapshot.dart';
 import '../models/file_data.dart';
 import '../models/upload_status.dart';
 import 'managed_transfer.dart';
+import 'transfer_http.dart';
 
 enum UploadTaskStatus {
   queued,
@@ -44,7 +45,7 @@ abstract class UploadTask {
   final int multipartThreshold;
   final int maxRetries;
   final Duration retryBaseDelay;
-  final Dio _httpClient;
+  final WincheHttp _httpClient;
   final Future<String> Function()? _stageSource;
   final Future<String?> Function(FileData confirmed)? _onPinFinalize;
   final Future<void> Function(FileData confirmed)? _onPinDeferred;
@@ -60,7 +61,7 @@ abstract class UploadTask {
   final _stateController = StreamController<UploadTaskState>.broadcast();
   final _taskCompleter = Completer<FileSnapshot?>();
 
-  CancelToken? _cancelToken;
+  TransferAbort? _cancelToken;
   UploadTaskState _state;
 
   UploadTaskState get state => _state;
@@ -83,7 +84,7 @@ abstract class UploadTask {
     required this.multipartThreshold,
     required this.maxRetries,
     required this.retryBaseDelay,
-    required Dio httpClient,
+    required WincheHttp httpClient,
     required UploadTaskStatus initialStatus,
     Future<String> Function()? stageSource,
     Future<String?> Function(FileData confirmed)? onPinFinalize,
@@ -96,9 +97,7 @@ abstract class UploadTask {
 
   /// Creates and immediately starts an [UploadTask] from a local file path.
   ///
-  /// [httpClient] should be a shared [Dio] instance configured by the caller.
-  /// If omitted, a private instance is created (note: it will not be disposed
-  /// by this task — prefer passing a shared one).
+  /// [httpClient] sends the bytes to the signed link; a shared client when omitted.
   factory UploadTask.start({
     required ChildReference reference,
     required String localPath,
@@ -107,15 +106,12 @@ abstract class UploadTask {
     required int multipartThreshold,
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
-    Dio? httpClient,
+    WincheHttp? httpClient,
     Future<String> Function()? stageSource,
     Future<String?> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
-    final client = httpClient ??
-        Dio(BaseOptions(
-          validateStatus: (status) => status != null,
-        ));
+    final client = httpClient ?? defaultTransferHttp;
 
     final task = _DirectUploadTask._(
       reference: reference,
@@ -137,9 +133,7 @@ abstract class UploadTask {
 
   /// Creates and immediately starts an [UploadTask] from raw bytes.
   ///
-  /// [httpClient] should be a shared [Dio] instance configured by the caller.
-  /// If omitted, a private instance is created (note: it will not be disposed
-  /// by this task — prefer passing a shared one).
+  /// [httpClient] sends the bytes to the signed link; a shared client when omitted.
   factory UploadTask.startFromBytes({
     required ChildReference reference,
     required Uint8List bytes,
@@ -148,15 +142,12 @@ abstract class UploadTask {
     required int multipartThreshold,
     int maxRetries = 3,
     Duration retryBaseDelay = const Duration(seconds: 1),
-    Dio? httpClient,
+    WincheHttp? httpClient,
     Future<String> Function()? stageSource,
     Future<String?> Function(FileData confirmed)? onPinFinalize,
     Future<void> Function(FileData confirmed)? onPinDeferred,
   }) {
-    final client = httpClient ??
-        Dio(BaseOptions(
-          validateStatus: (status) => status != null,
-        ));
+    final client = httpClient ?? defaultTransferHttp;
 
     final task = _DirectUploadTask._(
       reference: reference,
@@ -307,31 +298,18 @@ abstract class UploadTask {
       try {
         final session =
             await reference.api.generateFileUploadUrl(reference.path);
-        final Stream<List<int>> body =
-            bytes != null ? Stream.value(bytes) : localFile!.openRead();
-
-        final response = await _httpClient.put<void>(
+        await _put(
           session.url,
-          data: body,
-          options: Options(
-            contentType: mimeType,
-            headers: {
-              'Content-Length': sizeBytes.toString(),
-            },
-          ),
-          cancelToken: _cancelToken,
-          onSendProgress: (sent, _) {
+          () => bytes != null ? Stream.value(bytes) : localFile!.openRead(),
+          sizeBytes,
+          onSent: (sent) {
             if (sizeBytes > 0) _setProgress(sent / sizeBytes);
           },
+          failure: (code) => 'Failed to upload file: HTTP $code',
         );
-
-        final code = response.statusCode;
-        if (code != 200 && code != 201) {
-          throw Exception('Failed to upload file: HTTP $code');
-        }
         return;
-      } on DioException catch (e) {
-        if (e.type == DioExceptionType.cancel) rethrow;
+      } on WincheHttpException catch (e) {
+        if (!isTransferNetworkFailure(e)) rethrow;
 
         final isLastAttempt = attempt == maxRetries;
         if (isLastAttempt) rethrow;
@@ -355,37 +333,18 @@ abstract class UploadTask {
       try {
         final session = await reference.api
             .generatePartUploadUrl(reference.path, partNumber);
-        final Stream<List<int>> chunk;
-        if (bytes != null) {
-          chunk =
-              Stream.value(bytes.sublist(byteOffset, byteOffset + chunkSize));
-        } else {
-          chunk = localFile!.openRead(byteOffset, byteOffset + chunkSize);
-        }
-
-        final response = await _httpClient.put<void>(
+        await _put(
           session.url,
-          data: chunk,
-          options: Options(
-            contentType: mimeType,
-            headers: {
-              'Content-Length': chunkSize.toString(),
-            },
-          ),
-          cancelToken: _cancelToken,
-          onSendProgress: (sent, _) {
-            final overallProgress = (byteOffset + sent) / sizeBytes;
-            _setProgress(overallProgress);
-          },
+          () => bytes != null
+              ? Stream.value(bytes.sublist(byteOffset, byteOffset + chunkSize))
+              : localFile!.openRead(byteOffset, byteOffset + chunkSize),
+          chunkSize,
+          onSent: (sent) => _setProgress((byteOffset + sent) / sizeBytes),
+          failure: (code) => 'Failed to upload part $partNumber: HTTP $code',
         );
-
-        final code = response.statusCode;
-        if (code != 200 && code != 201) {
-          throw Exception('Failed to upload part $partNumber: HTTP $code');
-        }
         return;
-      } on DioException catch (e) {
-        if (e.type == DioExceptionType.cancel) rethrow;
+      } on WincheHttpException catch (e) {
+        if (!isTransferNetworkFailure(e)) rethrow;
 
         final isLastAttempt = attempt == maxRetries;
         if (isLastAttempt) rethrow;
@@ -394,6 +353,35 @@ abstract class UploadTask {
         await Future<void>.delayed(delay);
         if (!_isRunning) return;
       }
+    }
+  }
+
+  /// One PUT of [length] bytes to a signed link. An answer other than 200/201
+  /// throws a plain [Exception] worded by [failure]: the bucket refused, and
+  /// only a fresh session (a new attempt) can help. No answer at all throws the
+  /// [WincheHttpException], which the callers retry.
+  Future<void> _put(String url, Stream<List<int>> Function() body, int length,
+      {required void Function(int sent) onSent, required String Function(int code) failure}) async {
+    try {
+      final response = await _httpClient.send(WincheRequest.streamed(
+        'PUT',
+        Uri.parse(url),
+        body: body,
+        length: length,
+        headers: {'content-type': mimeType},
+        auth: WincheRequestAuth.none,
+        // Tries are this task's to count, with its own backoff.
+        idempotent: false,
+        timeout: transferTimeout,
+        abortTrigger: _cancelToken?.trigger,
+        onSendProgress: (sent, _) => onSent(sent),
+        service: 'storage',
+      ));
+      if (response.status != 200 && response.status != 201) throw Exception(failure(response.status));
+    } on WincheHttpException catch (e) {
+      final status = e.status;
+      if (status != null) throw Exception(failure(status));
+      rethrow;
     }
   }
 
@@ -407,7 +395,7 @@ abstract class UploadTask {
           'Cannot pause: task is ${_state.status} (expected running)');
     }
     _setStatus(UploadTaskStatus.paused);
-    _cancelToken?.cancel('paused');
+    _cancelToken?.abort();
     _cancelToken = null;
   }
 
@@ -426,7 +414,7 @@ abstract class UploadTask {
   /// Cancels in-flight HTTP without touching status or completion. Shared by
   /// the two [abortForClose] implementations.
   void _abortInFlight() {
-    _cancelToken?.cancel('closed');
+    _cancelToken?.abort();
     _cancelToken = null;
   }
 
@@ -439,7 +427,7 @@ abstract class UploadTask {
     }
 
     _setStatus(UploadTaskStatus.cancelled);
-    _cancelToken?.cancel('cancelled');
+    _cancelToken?.abort();
     _cancelToken = null;
 
     await reference.api.deleteFile(reference.path);
@@ -546,14 +534,14 @@ class _DirectUploadTask extends UploadTask {
 
   Future<void> _runUnmanaged() async {
     _setStatus(UploadTaskStatus.running);
-    _cancelToken = CancelToken();
+    _cancelToken = TransferAbort();
     try {
       final confirmed = await _attemptOnce();
       _setProgress(1.0);
       _setStatus(UploadTaskStatus.complete);
       _completeTask(confirmed);
-    } on DioException catch (e, st) {
-      if (e.type == DioExceptionType.cancel) return;
+    } on WincheHttpException catch (e, st) {
+      if (isTransferAborted(e)) return;
       await _handleFailure(e, st);
     } catch (e, st) {
       await _handleFailure(e, st);
@@ -592,15 +580,14 @@ class ManagedUploadTask extends UploadTask implements ManagedTransfer {
     required super.mimeType,
     super.metadata,
     required super.multipartThreshold,
-    Dio? httpClient,
+    WincheHttp? httpClient,
     super.stageSource,
     super.onPinFinalize,
     super.onPinDeferred,
   }) : super._(
           maxRetries: 0,
           retryBaseDelay: const Duration(seconds: 1),
-          httpClient: httpClient ??
-              Dio(BaseOptions(validateStatus: (status) => status != null)),
+          httpClient: httpClient ?? defaultTransferHttp,
           initialStatus: UploadTaskStatus.queued,
         );
 
@@ -651,7 +638,7 @@ class ManagedUploadTask extends UploadTask implements ManagedTransfer {
   @override
   Future<void> runOnce() async {
     _setStatus(UploadTaskStatus.running);
-    _cancelToken = CancelToken();
+    _cancelToken = TransferAbort();
     try {
       final confirmed = await _attemptOnce();
       _setProgress(1.0);
@@ -661,7 +648,7 @@ class ManagedUploadTask extends UploadTask implements ManagedTransfer {
       await _settleBeforeComplete();
       _completeTask(confirmed);
     } catch (e) {
-      if (e is DioException && e.type == DioExceptionType.cancel) return;
+      if (isTransferAborted(e)) return;
       _setStatus(UploadTaskStatus.queued);
       rethrow;
     }

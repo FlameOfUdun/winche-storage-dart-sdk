@@ -1,9 +1,13 @@
 import 'dart:convert';
-import 'package:dio/dio.dart';
+
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
+import 'package:winche_core/testing.dart';
+import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 
-const _baseUrl = 'https://api.test/files';
+const _baseUrl = 'https://api.test/files/v1';
 
 const _fileJson = {
   'id': 'rec1',
@@ -23,17 +27,28 @@ const _sessionJson = {
   'expiresAt': '2026-01-01T00:00:00Z'
 };
 
-(WincheStorageHttpApi, List<RequestOptions>) _stub(Object? responseData) {
-  final captured = <RequestOptions>[];
-  final dio = Dio(BaseOptions(baseUrl: _baseUrl));
-  dio.interceptors.add(InterceptorsWrapper(
-    onRequest: (options, handler) {
-      captured.add(options);
-      handler.resolve(Response(
-          requestOptions: options, statusCode: 200, data: responseData));
-    },
-  ));
-  return (WincheStorageHttpApi(baseUrl: _baseUrl, httpClient: dio), captured);
+MockClient _answering(Object? responseData, List<http.Request> captured) => MockClient((request) async {
+      captured.add(request);
+      return http.Response(responseData == null ? '' : jsonEncode(responseData), 200);
+    });
+
+(WincheStorageHttpApi, List<http.Request>) _stub(Object? responseData) {
+  final captured = <http.Request>[];
+  final api = WincheStorageHttpApi(
+    endpoint: Uri.parse(_baseUrl),
+    http: WincheHttp.standalone(client: _answering(responseData, captured)),
+  );
+  return (api, captured);
+}
+
+/// Hands over the session core builds, like the storage service does.
+final class _Grab extends WincheService implements WincheSessionConsumer {
+  _Grab(super.app);
+  WincheSession? session;
+  @override
+  Future<void> onSessionChanged(WincheSession? session) async => this.session = session;
+  @override
+  Future<void> onTokenChanged() async {}
 }
 
 String _enc(String p) => base64Url.encode(utf8.encode(p));
@@ -44,8 +59,8 @@ void main() {
     await api
         .setFile('userFiles/u1/a.png', 'image/png', 10, metadata: {'k': 'v'});
     expect(reqs.single.method, 'PUT');
-    expect(reqs.single.path, '$_baseUrl/${_enc('userFiles/u1/a.png')}');
-    expect(jsonDecode(reqs.single.data as String), {
+    expect(_where(reqs.single), '$_baseUrl/${_enc('userFiles/u1/a.png')}');
+    expect(jsonDecode(reqs.single.body), {
       'mimeType': 'image/png',
       'sizeBytes': 10,
       'metadata': {'k': 'v'}
@@ -56,15 +71,15 @@ void main() {
     final (api, reqs) = _stub(_fileJson);
     await api.getFile('a');
     expect(reqs.single.method, 'GET');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}');
   });
 
   test('updateMetadata -> PATCH /{enc} with body', () async {
     final (api, reqs) = _stub(_fileJson);
     await api.updateMetadata('a', {'k': 'v2'});
     expect(reqs.single.method, 'PATCH');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}');
-    expect(jsonDecode(reqs.single.data as String), {
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}');
+    expect(jsonDecode(reqs.single.body), {
       'metadata': {'k': 'v2'}
     });
   });
@@ -73,36 +88,36 @@ void main() {
     final (api, reqs) = _stub(_fileJson);
     await api.confirmUpload('a');
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}:confirm');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:confirm');
   });
 
   test('generateFileUploadUrl -> POST /{enc}:upload', () async {
     final (api, reqs) = _stub(_sessionJson);
     await api.generateFileUploadUrl('a');
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}:upload');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:upload');
   });
 
   test('generateDownloadUrl -> POST /{enc}:download', () async {
     final (api, reqs) = _stub(_sessionJson);
     await api.generateDownloadUrl('a');
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}:download');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:download');
   });
 
   test('listDirectory -> POST /{enc}:list?mimeType=', () async {
     final (api, reqs) = _stub([_fileJson]);
     await api.listDirectory('userFiles/u1', mimeType: 'image/png');
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('userFiles/u1')}:list');
-    expect(reqs.single.queryParameters['mimeType'], 'image/png');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('userFiles/u1')}:list');
+    expect(reqs.single.url.queryParameters['mimeType'], 'image/png');
   });
 
   test('listParts -> POST /{enc}:listParts', () async {
     final (api, reqs) = _stub(<dynamic>[]);
     await api.listParts('a');
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}:listParts');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:listParts');
   });
 
   test('generatePartUploadUrl -> POST /{enc}:signPart with partNumber body',
@@ -110,8 +125,8 @@ void main() {
     final (api, reqs) = _stub(_sessionJson);
     await api.generatePartUploadUrl('a', 3);
     expect(reqs.single.method, 'POST');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}:signPart');
-    expect(jsonDecode(reqs.single.data as String), {'partNumber': 3});
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}:signPart');
+    expect(jsonDecode(reqs.single.body), {'partNumber': 3});
   });
 
   test('deleteFile -> DELETE /{enc}', () async {
@@ -119,25 +134,31 @@ void main() {
     final ok = await api.deleteFile('a');
     expect(ok, isTrue);
     expect(reqs.single.method, 'DELETE');
-    expect(reqs.single.path, '$_baseUrl/${_enc('a')}');
+    expect(_where(reqs.single), '$_baseUrl/${_enc('a')}');
   });
 
-  test('tokenProvider adds Authorization: Bearer header', () async {
-    final captured = <RequestOptions>[];
-    final dio = Dio(BaseOptions(baseUrl: _baseUrl));
-    dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (options, handler) {
-        captured.add(options);
-        handler.resolve(Response(
-            requestOptions: options, statusCode: 200, data: _fileJson));
-      },
-    ));
+  test("a session-bound API sends that session's token", () async {
+    final app = WincheApp('routes');
+    final auth = ScriptedAuthService(app);
+    final grab = _Grab(app);
+    auth.announce(WincheIdentity('u1'));
+    await app.settled;
+    final captured = <http.Request>[];
     final api = WincheStorageHttpApi(
-      baseUrl: _baseUrl,
-      tokenProvider: () async => 'tok-123',
-      httpClient: dio,
+      endpoint: Uri.parse(_baseUrl),
+      http: WincheHttp.standalone(client: _answering(_fileJson, captured)),
+      session: grab.session,
     );
     await api.getFile('a');
-    expect(captured.single.headers['Authorization'], 'Bearer tok-123');
+    expect(captured.single.headers['authorization'], 'Bearer token-u1-0');
+    await app.dispose();
+  });
+
+  test('without a session, no token is sent', () async {
+    final (api, reqs) = _stub(_fileJson);
+    await api.getFile('a');
+    expect(reqs.single.headers['authorization'], isNull);
   });
 }
+
+String _where(http.Request r) => '${r.url.origin}${r.url.path}';

@@ -1,10 +1,10 @@
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import 'support/noop_api.dart';
+import 'support/fake_http.dart';
 
 /// Captures the record-handling and transfer-path decisions [UploadTask] makes.
 class _UploadApi extends NoopApi {
@@ -82,19 +82,6 @@ class _UploadApi extends NoopApi {
 }
 
 /// Returns HTTP 200 for every PUT so the upload progresses.
-class _OkAdapter implements HttpClientAdapter {
-  int puts = 0;
-
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
-    puts++;
-    return ResponseBody.fromBytes(<int>[], 200);
-  }
-
-  @override
-  void close({bool force = false}) {}
-}
 
 UploadTask _start(
   _UploadApi api,
@@ -102,14 +89,12 @@ UploadTask _start(
   String mime = 'image/png',
   int threshold = 5 * 1024 * 1024,
 }) {
-  final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-    ..httpClientAdapter = _OkAdapter();
   return UploadTask.startFromBytes(
     reference: ChildReference(path: 'a/b', api: api),
     bytes: bytes,
     mimeType: mime,
     multipartThreshold: threshold,
-    httpClient: dio,
+    httpClient: okHttp(),
   );
 }
 

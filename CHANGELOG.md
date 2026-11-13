@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 6.0.0
+
+On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
+
+### Breaking
+
+- **Needs `winche_core` 1.0.** The endpoint is `/files/v1` under `WincheOptions.baseUrl` (or
+  `WincheOptions.endpoints['storage']`); the server side moved to `/files/v1` in Winche.Storage. `WincheStorage` is a
+  plain `WincheService` that follows the session.
+- **`dio` is gone.** Requests to the Winche API go through the app's `app.http`, and the bytes to and from signed links
+  through streamed `package:http` requests, with the same progress, pause, resume and cancel. `httpClient` parameters
+  on `UploadTask`, `DownloadTask`, `TransferController` and `OfflineCatalog` take a `WincheHttp` (in tests,
+  `WincheHttp.standalone(client: MockClient(…))`).
+- **`WincheStorageHttpApi(endpoint:, http:, session:)`** replaces `(baseUrl:, tokenProvider:, httpClient:)`.
+
+### New
+
+- **A refused token is refreshed once and the request tried again**, for every storage request. Lookups and other
+  requests that are safe to repeat are retried on network errors and 502/503/504.
+- **A request that straddles a user switch fails with `WincheSessionExpired`** instead of carrying the next user's
+  token; the queue treats it as a pause.
+
 ## 5.2.0
 
 - **New: signed-out access.** `WincheStorageConfig(allowSignedOut: true)` lets storage work while nobody is signed in,

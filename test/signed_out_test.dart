@@ -5,7 +5,7 @@ import 'package:winche_storage/winche_storage.dart';
 void main() {
   WincheApp app() => WincheApp('storage-signed-out-${DateTime.now().microsecondsSinceEpoch}',
       // Refused fast: these tests only care how far a call gets.
-      options: WincheOptions(storageEndpoint: Uri.parse('http://localhost:1/files')));
+      options: WincheOptions(endpoints: {'storage': Uri.parse('http://localhost:1/files')}));
 
   test('off by default: signed out is unbound', () async {
     final a = app();

@@ -1,12 +1,11 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/offline_catalog.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 FileData _data({UploadStatus status = UploadStatus.complete}) => FileData(
       id: 'id-a_b.png',
@@ -39,20 +38,12 @@ class _CountingApi extends NoopApi {
       DownloadSession(url: 'https://dl/x', expiresAt: DateTime.utc(2030));
 }
 
-class _BytesAdapter implements HttpClientAdapter {
+class _BytesAdapter {
   var fetches = 0;
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
+  late final http = fakeHttp((_) {
     fetches++;
-    return ResponseBody.fromBytes([1, 2, 3], 200,
-        headers: {
-          Headers.contentLengthHeader: ['3']
-        });
-  }
-
-  @override
-  void close({bool force = false}) {}
+    return respond([1, 2, 3]);
+  });
 }
 
 void main() {
@@ -69,14 +60,12 @@ void main() {
 
   ({OfflineCatalog catalog, _BytesAdapter adapter}) build(_CountingApi api) {
     final adapter = _BytesAdapter();
-    final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-      ..httpClientAdapter = adapter;
     return (
       catalog: OfflineCatalog(
         api: api,
         store: MemoryStorageLocalStore(),
         directoryResolver: () async => tmp.path,
-        httpClient: dio,
+        httpClient: adapter.http,
       ),
       adapter: adapter,
     );

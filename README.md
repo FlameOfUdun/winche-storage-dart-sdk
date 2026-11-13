@@ -40,7 +40,7 @@ Or add them to `pubspec.yaml`:
 ```yaml
 dependencies:
   winche_core: ^0.2.0
-  winche_storage: ^5.0.0
+  winche_storage: ^6.0.0
 ```
 
 `winche_core` is not optional. It owns the app, the endpoints and the session
@@ -59,7 +59,7 @@ import 'package:winche_storage/winche_storage.dart';
 void main() {
   Winche.initializeApp(
     options: WincheOptions(
-      storageEndpoint: Uri.parse('https://your-api.example.com/files'),
+      baseUrl: Uri.parse('https://your-api.example.com'),   // files at /files/v1
 
       // The parent directory every Winche package creates its state under.
       // Its presence (or inMemory, or web) enables the durable upload outbox
@@ -796,7 +796,7 @@ Subclasses: `StorageNotFoundException`, `StoragePermissionDeniedException`,
 
 ## Dependencies
 
-- [`dio`](https://pub.dev/packages/dio) — HTTP client used by `WincheStorageHttpApi`, `UploadTask`, and `DownloadTask`
+- [`http`](https://pub.dev/packages/http) — through `winche_core`'s `app.http` for the API, and streamed requests for the bytes to and from signed links
 - [`mime`](https://pub.dev/packages/mime) — MIME type inference from file extension in `ChildReference.uploadPath`
 - [`path`](https://pub.dev/packages/path) — platform-correct path joining for the file cache
 - [`sembast`](https://pub.dev/packages/sembast) / [`sembast_web`](https://pub.dev/packages/sembast_web) — pure-Dart durable store for the cache catalog and upload queue (native file / web IndexedDB)

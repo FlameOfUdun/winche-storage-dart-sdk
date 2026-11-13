@@ -36,7 +36,11 @@ final class StorageBinding {
   /// returns whether it did.
   final bool Function()? bindSignedOut;
 
-  StorageBinding({required this.registry, required this.onUse, this.bindSignedOut});
+  StorageBinding({required this.registry, required this.onUse, this.bindSignedOut, this.transfers});
+
+  /// The client one-shot transfers send their bytes through (the app's), or
+  /// null for the shared fallback.
+  final WincheHttp? transfers;
 
   WincheStorageApi? _api;
   OfflineCatalog? _catalog;

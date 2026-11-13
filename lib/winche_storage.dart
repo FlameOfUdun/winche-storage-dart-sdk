@@ -114,7 +114,7 @@ final class WincheStorageConfig {
 ///
 /// NOTE: a persistent (sembast) store must be owned by a single isolate. Do not
 /// open the same on-disk store from multiple isolates concurrently.
-final class WincheStorage extends WincheStorageService {
+final class WincheStorage extends WincheService implements WincheSessionConsumer {
   /// Creates the storage service and registers it with [app].
   ///
   /// Prefer [instance]; construct directly only to attach to a non-default app.
@@ -126,6 +126,13 @@ final class WincheStorage extends WincheStorageService {
   /// The storage attached to [app], building it if needed.
   static WincheStorage instanceFor(WincheApp app) =>
       WincheService.instanceFor(app, () => WincheStorage(app));
+
+  /// The service's id in `WincheOptions.endpoints`.
+  static const serviceId = 'storage';
+
+  /// Its endpoint: `/files/v1` under `WincheOptions.baseUrl`, or
+  /// `WincheOptions.endpoints['storage']`.
+  Uri get _endpoint => (app.options ?? const WincheOptions()).endpointFor(serviceId, path: '/files/v1');
 
   WincheStorageApi? _api;
   StorageLocalStore? _store;
@@ -155,17 +162,14 @@ final class WincheStorage extends WincheStorageService {
     registry: _oneShots,
     onUse: () => _started = true,
     bindSignedOut: _bindSignedOut,
+    transfers: app.http,
   );
 
   /// With [WincheStorageConfig.allowSignedOut] and nobody signed in: a session
   /// with no token and a memory-only queue. Whether one was bound.
   bool _bindSignedOut() {
     if (!_config.allowSignedOut || isDisposed || _isBound) return false;
-    final endpoint = app.options?.storageEndpoint;
-    if (endpoint == null) {
-      throw StateError('WincheOptions.storageEndpoint is required to use winche_storage.');
-    }
-    _bind(api: WincheStorageHttpApi(baseUrl: endpoint.toString()), store: MemoryStorageLocalStore(), resolveDirectory: null);
+    _bind(api: WincheStorageHttpApi(endpoint: _endpoint, http: app.http), store: MemoryStorageLocalStore(), resolveDirectory: null);
     return true;
   }
 
@@ -211,12 +215,7 @@ final class WincheStorage extends WincheStorageService {
     if (_isBound) await _teardown();
     if (session == null) return;
 
-    final endpoint = app.options?.storageEndpoint;
-    if (endpoint == null) {
-      throw StateError(
-        'WincheOptions.storageEndpoint is required to use winche_storage.',
-      );
-    }
+    final endpoint = _endpoint;
 
     final root = app.options?.directoryResolver;
 
@@ -233,18 +232,9 @@ final class WincheStorage extends WincheStorageService {
     final needsStore = _config.inMemory || root != null || _kIsWeb;
 
     _bind(
-      api: WincheStorageHttpApi(
-        baseUrl: endpoint.toString(),
-        tokenProvider: () async {
-          final token = await session.token();
-          if (token == null) {
-            throw const StorageUnauthenticatedException(
-              'No auth token available for the current session.',
-            );
-          }
-          return token;
-        },
-      ),
+      // Bound to this session: a request still in flight after a user switch
+      // fails with WincheSessionExpired instead of carrying the next user's token.
+      api: WincheStorageHttpApi(endpoint: endpoint, http: app.http, session: session),
       store: !needsStore
           ? null
           : (_config.inMemory
@@ -280,6 +270,7 @@ final class WincheStorage extends WincheStorageService {
             api: api,
             store: store,
             multipartThreshold: _config.multipartThreshold,
+            httpClient: app.http,
             directoryResolver: resolveDirectory,
             retry: TransferRetryConfig(
               baseDelay: _config.retryBaseDelay,
@@ -295,6 +286,7 @@ final class WincheStorage extends WincheStorageService {
             store: store,
             directoryResolver: resolveDirectory,
             multipartThreshold: _config.multipartThreshold,
+            httpClient: app.http,
             // So a cache fill is aborted with everything else on teardown, and
             // shows up on transferEvents like any other transfer.
             registry: _oneShots,
