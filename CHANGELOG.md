@@ -4,6 +4,8 @@
 
 On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
 
+`FileLink` on `winche_database`'s expand links: `link.file` (`FileSnapshot`), `link.fileRef` (`ChildReference`).
+
 ### Breaking
 
 - **Listing is paged, with folders.** `WincheStorageApi.list(directory, {maxResults, pageToken, mimeType})` returns a
