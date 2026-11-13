@@ -80,11 +80,11 @@ Storage never sees a token or a user id directly. It reads a token from the
 session on every request, so a rotated token is picked up automatically, and it
 scopes local state by the signed-in identity without being told who that is.
 
-Tuning that storage decides for itself lives on `WincheStorageConfig`, set once
+Tuning that storage decides for itself lives on `WincheStorageSettings`, set once
 immediately after obtaining the instance:
 
 ```dart
-WincheStorage.instance.config = const WincheStorageConfig(
+WincheStorage.instance.settings = const WincheStorageSettings(
   // Files larger than this are uploaded in parts. Defaults to 5 MiB.
   multipartThreshold: 5 * 1024 * 1024,
 
@@ -204,7 +204,7 @@ To use storage while nobody is signed in — public files, or an app with no
 sign-in at all:
 
 ```dart
-storage.config = const WincheStorageConfig(allowSignedOut: true);
+storage.settings = const WincheStorageSettings(allowSignedOut: true);
 ```
 
 Requests then go without a token and the server's rules decide
@@ -506,7 +506,7 @@ a prefix from different content produces a file of exactly the right length.
 Available when a store is configured (see [Setup](#setup)). Uploads started with
 `enqueue: true` are persisted to a durable outbox, resumed when the SDK binds a
 session, and retried on failure with exponential backoff (configurable via the
-`retry*` fields on `WincheStorageConfig`).
+`retry*` fields on `WincheStorageSettings`).
 
 ```dart
 // `enqueue: true` makes it durable — queued, resumed after a restart, retried.
@@ -629,7 +629,7 @@ final bool deleted = await photoRef.delete(); // false if the file didn't exist
 
 ## API reference
 
-### `WincheStorageConfig`
+### `WincheStorageSettings`
 
 Set once, immediately after obtaining the instance; changing it after storage
 has been used throws a `StateError`.
@@ -653,7 +653,7 @@ configured.
 | Member | Description |
 | --- | --- |
 | `WincheStorage.instance` | The storage attached to the default app, building it if needed. Returns bound when an identity is already signed in. Use `instanceFor(app)` for a named app. |
-| `config` | `WincheStorageConfig`. Settable until storage is first used, `StateError` after. |
+| `config` | `WincheStorageSettings`. Settable until storage is first used, `StateError` after. |
 | `child(path)` | Returns a `ChildReference`. Never throws: the reference resolves its api and store when used. |
 | `resumeUploads()` | Re-drives every upload halted by a pause (expired token, unreachable server). Automatic on sign-in and on a token refresh — call it only for what the SDK cannot see, such as the OS reporting the network is back. |
 | `pendingUploads()` | Snapshot of the durable outbox (pending/running/paused/failed `TransferRecord`s). Uploads only — downloads are not persisted. |

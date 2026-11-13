@@ -32,7 +32,7 @@ final class StorageBinding {
   /// mark itself used and refuse further config changes.
   final void Function() onUse;
 
-  /// Binds a signed-out session when allowed (`WincheStorageConfig.allowSignedOut`);
+  /// Binds a signed-out session when allowed (`WincheStorageSettings.allowSignedOut`);
   /// returns whether it did.
   final bool Function()? bindSignedOut;
 

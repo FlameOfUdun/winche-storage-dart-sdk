@@ -17,6 +17,8 @@ On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
 
 ### New
 
+- **`settings`**, like every Winche package: `WincheStorage.instance.settings = WincheStorageSettings(…)`. `config` and `WincheStorageConfig` remain, deprecated.
+
 - **A refused token is refreshed once and the request tried again**, for every storage request. Lookups and other
   requests that are safe to repeat are retried on network errors and 502/503/504.
 - **A request that straddles a user switch fails with `WincheSessionExpired`** instead of carrying the next user's

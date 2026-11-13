@@ -65,7 +65,7 @@ void main() {
     );
     auth = ScriptedAuthService(app);
     storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(
+      ..settings = const WincheStorageSettings(
         retryBaseDelay: Duration(milliseconds: 5),
         retryMaxDelay: Duration(milliseconds: 10),
         retryPollInterval: Duration(hours: 1),
@@ -155,7 +155,7 @@ void main() {
       // Still settable: observing whether transfers are happening must not
       // lock the tuning the next session is built from.
       expect(
-        () => storage.config = const WincheStorageConfig(inMemory: true),
+        () => storage.settings = const WincheStorageSettings(inMemory: true),
         returnsNormally,
       );
     });

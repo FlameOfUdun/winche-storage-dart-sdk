@@ -25,7 +25,7 @@ Future<void> main(List<String> args) async {
   // Signed in: put a public file.
   final writer = WincheApp('writer', options: options);
   _TokenAuth(writer, args.first);
-  final signedIn = WincheStorage(writer)..config = const WincheStorageConfig(inMemory: true);
+  final signedIn = WincheStorage(writer)..settings = const WincheStorageSettings(inMemory: true);
   await writer.settled;
   await signedIn.child('public/hello.txt').uploadBytes(Uint8List.fromList(utf8.encode('hello, signed-out world')), 'text/plain').whenDone;
   stdout.writeln('signed-in upload public/hello.txt: done');
@@ -33,7 +33,7 @@ Future<void> main(List<String> args) async {
 
   // Signed out, no auth service: read it back.
   final reader = WincheApp('reader', options: options);
-  final storage = WincheStorage(reader)..config = const WincheStorageConfig(allowSignedOut: true, inMemory: true);
+  final storage = WincheStorage(reader)..settings = const WincheStorageSettings(allowSignedOut: true, inMemory: true);
   final snapshot = await storage.child('public/hello.txt').getSnapshot();
   stdout.writeln('signed-out snapshot: exists=${snapshot.exists} size=${snapshot.data?.sizeBytes}');
   final file = '${Directory.systemTemp.createTempSync('winche-').path}/hello.txt';

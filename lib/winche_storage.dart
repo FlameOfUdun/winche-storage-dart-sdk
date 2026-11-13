@@ -60,13 +60,17 @@ const bool _kIsWeb = identical(0, 0.0);
 String webDatabaseNameFor(WincheIdentity identity) =>
     'winche_${identity.storageKey}_storage';
 
+/// The old name of [WincheStorageSettings].
+@Deprecated('Use WincheStorageSettings. Removed in the next major version.')
+typedef WincheStorageConfig = WincheStorageSettings;
+
 /// Tuning for a [WincheStorage].
 ///
 /// Only what storage decides for itself. The endpoint, the auth token, the
 /// identity that scopes local state, and the directory that state lives under
 /// all come from `winche_core` — see [WincheOptions] — so they cannot be set
 /// here and cannot disagree with the rest of the stack.
-final class WincheStorageConfig {
+final class WincheStorageSettings {
   /// Files larger than this are uploaded in multiple parts. Defaults to 5 MiB.
   final int multipartThreshold;
 
@@ -88,7 +92,7 @@ final class WincheStorageConfig {
   /// the attempt cap. Defaults to 30s.
   final Duration retryPollInterval;
 
-  const WincheStorageConfig({
+  const WincheStorageSettings({
     this.multipartThreshold = 5 * 1024 * 1024,
     this.inMemory = false,
     this.retryBaseDelay = const Duration(seconds: 1),
@@ -165,7 +169,7 @@ final class WincheStorage extends WincheService implements WincheSessionConsumer
     transfers: app.http,
   );
 
-  /// With [WincheStorageConfig.allowSignedOut] and nobody signed in: a session
+  /// With [WincheStorageSettings.allowSignedOut] and nobody signed in: a session
   /// with no token and a memory-only queue. Whether one was bound.
   bool _bindSignedOut() {
     if (!_config.allowSignedOut || isDisposed || _isBound) return false;
@@ -175,25 +179,32 @@ final class WincheStorage extends WincheService implements WincheSessionConsumer
 
   bool _started = false;
 
-  WincheStorageConfig _config = const WincheStorageConfig();
+  WincheStorageSettings _config = const WincheStorageSettings();
 
   /// Tuning for the sessions this facade builds.
-  WincheStorageConfig get config => _config;
+  WincheStorageSettings get settings => _config;
 
   /// Throws a [StateError] once the current session has been used.
   ///
   /// Construction is lazy, so a session core bound synchronously during
   /// `WincheStorage.instance` has not been used yet. That window is what lets
-  /// `instance.config = ...` work on the line after `.instance`.
-  set config(WincheStorageConfig value) {
+  /// `instance.settings = ...` work on the line after `.instance`.
+  set settings(WincheStorageSettings value) {
     if (_started) {
       throw StateError(
-        'WincheStorage.config cannot be changed once storage has been used. '
+        'WincheStorage.settings cannot be changed once storage has been used. '
         'Set it immediately after first obtaining the instance.',
       );
     }
     _config = value;
   }
+
+  /// The old name of [settings].
+  @Deprecated('Use settings. Removed in the next major version.')
+  WincheStorageSettings get config => settings;
+
+  @Deprecated('Use settings. Removed in the next major version.')
+  set config(WincheStorageSettings value) => settings = value;
 
   /// Whether a session is currently bound. For tests and the core contract
   /// suite only.
@@ -364,7 +375,7 @@ final class WincheStorage extends WincheService implements WincheSessionConsumer
     return _controller ??
         (throw StateError(
           'No local store configured. Set WincheOptions.directoryResolver, or '
-          'WincheStorageConfig.inMemory, to enable the durable transfer queue.',
+          'WincheStorageSettings.inMemory, to enable the durable transfer queue.',
         ));
   }
 
@@ -435,7 +446,7 @@ final class WincheStorage extends WincheService implements WincheSessionConsumer
     if (catalog == null) {
       throw StateError(
         'No local store configured. Set WincheOptions.directoryResolver, or '
-        'WincheStorageConfig.inMemory, to enable the file cache.',
+        'WincheStorageSettings.inMemory, to enable the file cache.',
       );
     }
     return catalog.clear();

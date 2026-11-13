@@ -118,7 +118,7 @@ void main() {
 
       Winche.initializeApp(
         options: WincheOptions(
-          storageEndpoint: Uri.parse('http://localhost:5209/files'),
+          endpoints: {'storage': Uri.parse('http://localhost:5209/files')},
           directoryResolver: () async => dir,
         ),
       );

@@ -9,7 +9,7 @@ import 'package:file_picker/file_picker.dart';
 
 /// Stands in for a real auth package. A production app uses one that talks to
 /// its backend; all this SDK needs is an identity announced to core.
-final class DemoAuth extends WincheAuthService {
+final class DemoAuth extends WincheService with WincheIdentitySource {
   DemoAuth(super.app);
 
   WincheIdentity? _identity;

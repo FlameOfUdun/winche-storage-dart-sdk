@@ -43,7 +43,7 @@ void main() {
     addTearDown(app.dispose);
     final auth = ScriptedAuthService(app);
     final storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(inMemory: true);
+      ..settings = const WincheStorageSettings(inMemory: true);
 
     auth.announce(WincheIdentity('user-1'));
     await app.settled;
@@ -66,7 +66,7 @@ void main() {
     final app = WincheApp('facade-pin');
     addTearDown(app.dispose);
     final storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(
+      ..settings = const WincheStorageSettings(
         retryMaxAttempts: 0,
         retryPollInterval: Duration(hours: 1),
       );

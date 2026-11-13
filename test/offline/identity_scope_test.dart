@@ -114,7 +114,7 @@ void main() {
       );
       auth = ScriptedAuthService(app);
       storage = WincheStorage(app)
-        ..config = const WincheStorageConfig(
+        ..settings = const WincheStorageSettings(
           retryPollInterval: Duration(hours: 1),
         );
     });

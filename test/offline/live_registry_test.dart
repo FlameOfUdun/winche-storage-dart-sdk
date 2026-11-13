@@ -44,7 +44,7 @@ void main() {
     tmp = Directory.systemTemp.createTempSync('winche-registry');
     app = WincheApp('registry');
     storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(
+      ..settings = const WincheStorageSettings(
         retryPollInterval: Duration(hours: 1),
       );
     api = _HangingApi();
