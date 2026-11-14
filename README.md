@@ -651,6 +651,31 @@ final bool deleted = await photoRef.delete(); // false if nothing was there
 await storage.child('userFiles/user-123/album').delete(); // a folder: everything under it, each file rule-checked
 ```
 
+### Files in database documents
+
+With `winche_database`, a document can point at a file: store it as a file reference with `Link.file(path)`, and a
+read that expands the field brings the file's record with the document (one request, live in listeners):
+
+```dart
+import 'package:winche_database/winche_database.dart';
+
+await db.doc('visits/v1').set({'scan': Link.file('scans/chest-xray.png')});
+
+final visit = await db.doc('visits/v1').expand(['scan']).get();
+final scan = visit.data()!['scan'] as Link;        // always a Link: kind LinkKind.file, target the path
+final file = scan.withConverter(Converter<FileData>(FileData.fromJson, (_) => {})).data();
+print(file?.sizeBytes);                            // the record, as getSnapshot() gives it
+final bytes = storage.child(scan.target);          // the bytes still come from storage
+```
+
+- The record is what `getSnapshot()` returns (type, size, metadata, upload status), never a download link: download
+  with `storage.child(link.target)` as usual.
+- `data()` is null when the field wasn't expanded, the file doesn't exist, or the storage rules don't let this user
+  `get` it; `target` is always there.
+- A listener on the document emits again when the file changes (uploaded, metadata updated, deleted).
+- A plain string path is never expanded: store paths with `Link.file`. Offline, expanded files show what the last
+  online read brought.
+
 ## API reference
 
 ### `WincheStorageSettings`

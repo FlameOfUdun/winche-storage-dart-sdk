@@ -4,6 +4,9 @@
 
 On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
 
+Docs: **Files in database documents**: `Link.file(path)` in a document, expanded by `winche_database` into the file's
+record (read with `FileData.fromJson`).
+
 ### Breaking
 
 - **Listing is paged, with folders.** `WincheStorageApi.list(directory, {maxResults, pageToken, mimeType})` returns a
