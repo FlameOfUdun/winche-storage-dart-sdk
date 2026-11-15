@@ -1,6 +1,6 @@
 import 'file_data.dart';
 
-/// One page of a folder listing, as Firebase's `list()`: the files directly in
+/// One page of a folder listing: the files directly in
 /// the folder ([items]), its sub-folders as full paths ([prefixes]), and the
 /// token for the next page ([nextPageToken], null on the last).
 final class FileListPage {

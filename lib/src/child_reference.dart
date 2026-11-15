@@ -183,7 +183,7 @@ final class ChildReference {
     return _snapshot(files, folders, null, timestamp);
   }
 
-  /// One page of this folder, as Firebase's `list()`: at most [maxResults]
+  /// One page of this folder: at most [maxResults]
   /// files and sub-folders (server default and cap 1,000) in name order, from
   /// [pageToken] (the previous page's `nextPageToken`). [listChildren] reads
   /// every page.
