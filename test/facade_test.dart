@@ -12,7 +12,8 @@ class _FakeApi extends NoopApi {
 
   @override
   Future<FileData> updateMetadata(
-          String path, Map<String, dynamic> metadata) async =>
+          String path, Map<String, dynamic> metadata,
+      {int? ifVersion, String? contentDisposition, String? cacheControl}) async =>
       updateResult!;
 }
 

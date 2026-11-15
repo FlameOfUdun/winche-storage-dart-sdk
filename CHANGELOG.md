@@ -1,5 +1,59 @@
 # CHANGELOG
 
+## 6.0.0
+
+On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.
+
+Docs: **Files in database documents**: `Link.file(path)` in a document, expanded by `winche_database` into the file's
+record (read with `FileData.fromJson`).
+
+### Breaking
+
+- **Listing is paged, with folders.** `WincheStorageApi.list(directory, {maxResults, pageToken, mimeType})` returns a
+  `FileListPage` (`items`, `prefixes`, `nextPageToken`) and replaces `listDirectory`. `ChildReference.list()` reads a
+  page, `listChildren()` every page; `DirectorySnapshot` gains `folders` and `nextPageToken`. `storage.child('')` lists
+  the top.
+- **`updateMetadata` merges** (a null value removes a key), as the server now does, and takes `ifVersion`,
+  `contentDisposition` and `cacheControl`. `setFile` takes `ifNotExists`, `ifVersion`, `contentDisposition` and
+  `cacheControl`; `deleteFile` / `delete()` take `ifVersion`. `FileData` has `contentDisposition` and `cacheControl`.
+- **`delete()` on a path removes everything under it too** (the server's folder delete), and clears this device's
+  copies and queued uploads under it.
+- **Replacing a file no longer deletes it first**: the server replaces the record in one step, so files under the
+  path are untouched and the old bytes stay readable until the new upload is confirmed.
+- **`UploadStatus.failed` is gone** (the server never set it).
+- **Paths have one form**: `child()` drops stray slashes and refuses `.` and `..` segments, as the server does.
+- **Needs `winche_core` 1.0.** The endpoint is `/files/v1` under `WincheOptions.baseUrl` (or
+  `WincheOptions.endpoints['storage']`); the server side moved to `/files/v1` in Winche.Storage. `WincheStorage` is a
+  plain `WincheService` that follows the session.
+- **`dio` is gone.** Requests to the Winche API go through the app's `app.http`, and the bytes to and from signed links
+  through streamed `package:http` requests, with the same progress, pause, resume and cancel. `httpClient` parameters
+  on `UploadTask`, `DownloadTask`, `TransferController` and `OfflineCatalog` take a `WincheHttp` (in tests,
+  `WincheHttp.standalone(client: MockClient(…))`).
+- **`WincheStorageHttpApi(endpoint:, http:, session:)`** replaces `(baseUrl:, tokenProvider:, httpClient:)`.
+- **`WincheStorageException`** has the shared `code` (`WincheErrorCode`), `reason` and `statusCode`; switch on `code`.
+  The per-kind subclasses, `status` (`StorageErrorStatus`), `details` and `fromStatus` are deprecated, and still
+  thrown and filled for this release.
+
+### New
+
+- **`settings`**, like every Winche package: `WincheStorage.instance.settings = WincheStorageSettings(…)`. `config` and `WincheStorageConfig` remain, deprecated.
+
+- **A refused token is refreshed once and the request tried again**, for every storage request. Lookups and other
+  requests that are safe to repeat are retried on network errors and 502/503/504.
+- **A request that straddles a user switch fails with `WincheSessionExpired`** instead of carrying the next user's
+  token; the queue treats it as a pause.
+
+## 5.2.0
+
+- **New: signed-out access.** `WincheStorageConfig(allowSignedOut: true)` lets storage work while nobody is signed in,
+  and in an app with no auth service at all: requests go without a token and the server's rules decide. The signed-out
+  session's queue is in memory only, and it's replaced when someone signs in. Off by default.
+
+## 5.1.5
+
+- **Fix: requires `dio` 5.11.** 5.1.4 uses `DioExceptionType.transformTimeout`, added in `dio` 5.11, but allowed
+  `dio` 5.9.2 — an app resolving 5.9.x failed to compile ("Member not found: 'transformTimeout'").
+
 
 ## 5.1.4
 

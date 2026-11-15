@@ -25,6 +25,7 @@ export 'src/child_reference.dart' show ChildReference;
 export 'src/file_snapshot.dart' show FileSnapshot;
 export 'src/directory_snapshot.dart' show DirectorySnapshot;
 export 'src/models/file_data.dart' show FileData;
+export 'src/models/file_list_page.dart' show FileListPage;
 export 'src/models/upload_session.dart' show UploadSession;
 export 'src/models/download_session.dart' show DownloadSession;
 export 'src/models/file_part.dart' show FilePart;
@@ -60,13 +61,17 @@ const bool _kIsWeb = identical(0, 0.0);
 String webDatabaseNameFor(WincheIdentity identity) =>
     'winche_${identity.storageKey}_storage';
 
+/// The old name of [WincheStorageSettings].
+@Deprecated('Use WincheStorageSettings. Removed in the next major version.')
+typedef WincheStorageConfig = WincheStorageSettings;
+
 /// Tuning for a [WincheStorage].
 ///
 /// Only what storage decides for itself. The endpoint, the auth token, the
 /// identity that scopes local state, and the directory that state lives under
 /// all come from `winche_core` — see [WincheOptions] — so they cannot be set
 /// here and cannot disagree with the rest of the stack.
-final class WincheStorageConfig {
+final class WincheStorageSettings {
   /// Files larger than this are uploaded in multiple parts. Defaults to 5 MiB.
   final int multipartThreshold;
 
@@ -88,14 +93,21 @@ final class WincheStorageConfig {
   /// the attempt cap. Defaults to 30s.
   final Duration retryPollInterval;
 
-  const WincheStorageConfig({
+  const WincheStorageSettings({
     this.multipartThreshold = 5 * 1024 * 1024,
     this.inMemory = false,
     this.retryBaseDelay = const Duration(seconds: 1),
     this.retryMaxDelay = const Duration(seconds: 30),
     this.retryMaxAttempts = 5,
     this.retryPollInterval = const Duration(seconds: 30),
+    this.allowSignedOut = false,
   });
+
+  /// Use storage while nobody is signed in (default false): requests go without
+  /// a token and the server's rules decide (`request.auth == null`) — public
+  /// files, or an app with no sign-in at all. The signed-out session keeps its
+  /// transfer queue in memory only, and ends when someone signs in.
+  final bool allowSignedOut;
 }
 
 /// The entry point for the Winche Storage Dart SDK.
@@ -107,7 +119,7 @@ final class WincheStorageConfig {
 ///
 /// NOTE: a persistent (sembast) store must be owned by a single isolate. Do not
 /// open the same on-disk store from multiple isolates concurrently.
-final class WincheStorage extends WincheStorageService {
+final class WincheStorage extends WincheService implements WincheSessionConsumer {
   /// Creates the storage service and registers it with [app].
   ///
   /// Prefer [instance]; construct directly only to attach to a non-default app.
@@ -119,6 +131,13 @@ final class WincheStorage extends WincheStorageService {
   /// The storage attached to [app], building it if needed.
   static WincheStorage instanceFor(WincheApp app) =>
       WincheService.instanceFor(app, () => WincheStorage(app));
+
+  /// The service's id in `WincheOptions.endpoints`.
+  static const serviceId = 'storage';
+
+  /// Its endpoint: `/files/v1` under `WincheOptions.baseUrl`, or
+  /// `WincheOptions.endpoints['storage']`.
+  Uri get _endpoint => (app.options ?? const WincheOptions()).endpointFor(serviceId, path: '/files/v1');
 
   WincheStorageApi? _api;
   StorageLocalStore? _store;
@@ -147,29 +166,46 @@ final class WincheStorage extends WincheStorageService {
   late final StorageBinding _binding = StorageBinding(
     registry: _oneShots,
     onUse: () => _started = true,
+    bindSignedOut: _bindSignedOut,
+    transfers: app.http,
   );
+
+  /// With [WincheStorageSettings.allowSignedOut] and nobody signed in: a session
+  /// with no token and a memory-only queue. Whether one was bound.
+  bool _bindSignedOut() {
+    if (!_config.allowSignedOut || isDisposed || _isBound) return false;
+    _bind(api: WincheStorageHttpApi(endpoint: _endpoint, http: app.http), store: MemoryStorageLocalStore(), resolveDirectory: null);
+    return true;
+  }
 
   bool _started = false;
 
-  WincheStorageConfig _config = const WincheStorageConfig();
+  WincheStorageSettings _config = const WincheStorageSettings();
 
   /// Tuning for the sessions this facade builds.
-  WincheStorageConfig get config => _config;
+  WincheStorageSettings get settings => _config;
 
   /// Throws a [StateError] once the current session has been used.
   ///
   /// Construction is lazy, so a session core bound synchronously during
   /// `WincheStorage.instance` has not been used yet. That window is what lets
-  /// `instance.config = ...` work on the line after `.instance`.
-  set config(WincheStorageConfig value) {
+  /// `instance.settings = ...` work on the line after `.instance`.
+  set settings(WincheStorageSettings value) {
     if (_started) {
       throw StateError(
-        'WincheStorage.config cannot be changed once storage has been used. '
+        'WincheStorage.settings cannot be changed once storage has been used. '
         'Set it immediately after first obtaining the instance.',
       );
     }
     _config = value;
   }
+
+  /// The old name of [settings].
+  @Deprecated('Use settings. Removed in the next major version.')
+  WincheStorageSettings get config => settings;
+
+  @Deprecated('Use settings. Removed in the next major version.')
+  set config(WincheStorageSettings value) => settings = value;
 
   /// Whether a session is currently bound. For tests and the core contract
   /// suite only.
@@ -191,12 +227,7 @@ final class WincheStorage extends WincheStorageService {
     if (_isBound) await _teardown();
     if (session == null) return;
 
-    final endpoint = app.options?.storageEndpoint;
-    if (endpoint == null) {
-      throw StateError(
-        'WincheOptions.storageEndpoint is required to use winche_storage.',
-      );
-    }
+    final endpoint = _endpoint;
 
     final root = app.options?.directoryResolver;
 
@@ -213,18 +244,9 @@ final class WincheStorage extends WincheStorageService {
     final needsStore = _config.inMemory || root != null || _kIsWeb;
 
     _bind(
-      api: WincheStorageHttpApi(
-        baseUrl: endpoint.toString(),
-        tokenProvider: () async {
-          final token = await session.token();
-          if (token == null) {
-            throw const StorageUnauthenticatedException(
-              'No auth token available for the current session.',
-            );
-          }
-          return token;
-        },
-      ),
+      // Bound to this session: a request still in flight after a user switch
+      // fails with WincheSessionExpired instead of carrying the next user's token.
+      api: WincheStorageHttpApi(endpoint: endpoint, http: app.http, session: session),
       store: !needsStore
           ? null
           : (_config.inMemory
@@ -260,6 +282,7 @@ final class WincheStorage extends WincheStorageService {
             api: api,
             store: store,
             multipartThreshold: _config.multipartThreshold,
+            httpClient: app.http,
             directoryResolver: resolveDirectory,
             retry: TransferRetryConfig(
               baseDelay: _config.retryBaseDelay,
@@ -275,6 +298,7 @@ final class WincheStorage extends WincheStorageService {
             store: store,
             directoryResolver: resolveDirectory,
             multipartThreshold: _config.multipartThreshold,
+            httpClient: app.http,
             // So a cache fill is aborted with everything else on teardown, and
             // shows up on transferEvents like any other transfer.
             registry: _oneShots,
@@ -352,7 +376,7 @@ final class WincheStorage extends WincheStorageService {
     return _controller ??
         (throw StateError(
           'No local store configured. Set WincheOptions.directoryResolver, or '
-          'WincheStorageConfig.inMemory, to enable the durable transfer queue.',
+          'WincheStorageSettings.inMemory, to enable the durable transfer queue.',
         ));
   }
 
@@ -367,7 +391,7 @@ final class WincheStorage extends WincheStorageService {
   /// about whoever is signed in at the moment you use it, never a stale
   /// session captured when it was built.
   ChildReference child(String path) =>
-      ChildReference.bound(path: path, binding: _binding);
+      ChildReference.bound(path: ChildReference.joinPath('', path), binding: _binding);
 
   /// Re-drives every upload halted by a pause — an expired token or an
   /// unreachable server.
@@ -423,7 +447,7 @@ final class WincheStorage extends WincheStorageService {
     if (catalog == null) {
       throw StateError(
         'No local store configured. Set WincheOptions.directoryResolver, or '
-        'WincheStorageConfig.inMemory, to enable the file cache.',
+        'WincheStorageSettings.inMemory, to enable the file cache.',
       );
     }
     return catalog.clear();

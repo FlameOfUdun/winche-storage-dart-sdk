@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_exception.dart';
@@ -41,44 +40,40 @@ TransferFailureClass classifyTransferFailure(Object error) {
   // is already tearing down.
   if (error is WincheSessionExpired) return TransferFailureClass.pause;
   // The byte transfer itself (the presigned PUT to object storage) surfaces
-  // Dio's own errors. A dropped or absent network there is a pause like any
-  // other: counting it as a retry spent the whole budget in about a minute
-  // offline and left the upload failed until the next app start.
-  if (error is DioException) {
-    return switch (error.type) {
-      DioExceptionType.connectionError ||
-      DioExceptionType.connectionTimeout ||
-      DioExceptionType.sendTimeout ||
-      DioExceptionType.receiveTimeout =>
-        TransferFailureClass.pause,
-      DioExceptionType.unknown when error.error is SocketException ||
-              error.error is HttpException =>
-        TransferFailureClass.pause,
-      // An HTTP error from the bucket (an expired presigned URL is a 403) is
-      // retried: the next attempt asks for a fresh upload session.
-      _ => TransferFailureClass.retry,
-    };
+  // the HTTP client's own errors. A dropped or absent network there is a pause
+  // like any other: counting it as a retry spent the whole budget in about a
+  // minute offline and left the upload failed until the next app start. An
+  // HTTP error from the bucket (an expired presigned URL is a 403) is retried:
+  // the next attempt asks for a fresh upload session.
+  if (error is WincheHttpException) {
+    return error.status == null && error.code != WincheErrorCode.cancelled
+        ? TransferFailureClass.pause
+        : TransferFailureClass.retry;
   }
   if (error is SocketException) return TransferFailureClass.pause;
   if (error is! WincheStorageException) return TransferFailureClass.retry;
-  return switch (error.status) {
+  return switch (error.code) {
     // Clears when the token is refreshed or the network returns.
-    StorageErrorStatus.unauthenticated ||
-    StorageErrorStatus.unavailable =>
-      TransferFailureClass.pause,
+    WincheErrorCode.unauthenticated || WincheErrorCode.unavailable => TransferFailureClass.pause,
 
     // The request itself is rejected; repeating it verbatim cannot help.
-    StorageErrorStatus.permissionDenied ||
-    StorageErrorStatus.notFound ||
-    StorageErrorStatus.invalidArgument ||
-    StorageErrorStatus.failedPrecondition =>
+    WincheErrorCode.permissionDenied ||
+    WincheErrorCode.notFound ||
+    WincheErrorCode.invalidArgument ||
+    WincheErrorCode.failedPrecondition ||
+    WincheErrorCode.alreadyExists ||
+    WincheErrorCode.outOfRange ||
+    WincheErrorCode.unimplemented =>
       TransferFailureClass.terminal,
 
-    // Server-side or ambiguous — worth a bounded number of retries.
-    StorageErrorStatus.internal ||
-    StorageErrorStatus.deadlineExceeded ||
-    StorageErrorStatus.cancelled ||
-    StorageErrorStatus.unknown =>
+    // Server-side, ambiguous or a limit — worth a bounded number of retries.
+    WincheErrorCode.internal ||
+    WincheErrorCode.deadlineExceeded ||
+    WincheErrorCode.cancelled ||
+    WincheErrorCode.aborted ||
+    WincheErrorCode.resourceExhausted ||
+    WincheErrorCode.dataLoss ||
+    WincheErrorCode.unknown =>
       TransferFailureClass.retry,
   };
 }

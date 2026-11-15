@@ -1,25 +1,28 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/transfer_controller.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 class _FlakyApi extends NoopApi {
   bool online = false;
   FileData? _rec;
   @override
   Future<FileData?> getFile(String path) async {
-    if (!online) throw const StorageUnavailableException('offline');
+    if (!online) throw StorageUnavailableException('offline');
     return _rec;
   }
 
   @override
   Future<FileData> setFile(String path, String mime, int size,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _rec = FileData(
         id: 'id', directory: 'd', path: path,
         createdAt: DateTime.utc(2026, 1, 1), updatedAt: DateTime.utc(2026, 1, 1),
@@ -34,15 +37,6 @@ class _FlakyApi extends NoopApi {
       _rec!.copyWith(uploadStatus: UploadStatus.complete);
 }
 
-class _OkAdapter implements HttpClientAdapter {
-  @override
-  Future<ResponseBody> fetch(RequestOptions o, Stream<Uint8List>? s,
-          Future<void>? c) async =>
-      ResponseBody.fromBytes(const [], 200);
-  @override
-  void close({bool force = false}) {}
-}
-
 void main() {
   late Directory tmp;
   setUp(() => tmp = Directory.systemTemp.createTempSync('winche-handle'));
@@ -52,8 +46,7 @@ void main() {
       TransferController(
         api: api, store: store, multipartThreshold: 5 * 1024 * 1024,
         directoryResolver: () async => tmp.path,
-        httpClient: Dio(BaseOptions(validateStatus: (s) => s != null))
-          ..httpClientAdapter = _OkAdapter(),
+        httpClient: okHttp(),
         retry: const TransferRetryConfig(
           baseDelay: Duration(milliseconds: 5),
           maxDelay: Duration(milliseconds: 10),

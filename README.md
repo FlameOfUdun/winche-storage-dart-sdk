@@ -22,7 +22,7 @@ Dart SDK for the WincheStorage file management backend. Provides resumable, mult
 - Pure Dart — no Flutter dependency. Persistence via [`sembast`](https://pub.dev/packages/sembast)
   (file on native, IndexedDB on web), or fully in-memory.
 - Pluggable backend via the `WincheStorageApi` interface (`WincheStorageHttpApi` ships by default).
-- Typed exceptions (`WincheStorageException` and subclasses).
+- One exception type, `WincheStorageException`, with the shared `WincheErrorCode`.
 
 > **Scope.** This package caches file *content*, not the storage index.
 > Directory listings and file metadata are always live reads and fail when the
@@ -39,8 +39,8 @@ Or add them to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  winche_core: ^0.2.0
-  winche_storage: ^5.0.0
+  winche_core: ^1.0.0
+  winche_storage: ^6.0.0
 ```
 
 `winche_core` is not optional. It owns the app, the endpoints and the session
@@ -59,15 +59,13 @@ import 'package:winche_storage/winche_storage.dart';
 void main() {
   Winche.initializeApp(
     options: WincheOptions(
-      storageEndpoint: Uri.parse('https://your-api.example.com/files'),
+      baseUrl: Uri.parse('https://your-api.example.com'),   // files at /files/v1
 
       // The parent directory every Winche package creates its state under.
       // Its presence (or inMemory, or web) enables the durable upload outbox
       // and the file cache — there are no separate enable flags.
-      directoryResolver: () async {
-        final dir = await getApplicationDocumentsDirectory(); // path_provider
-        return '${dir.path}/winche';
-      },
+      directoryResolver: () async =>
+          (await getApplicationDocumentsDirectory()).path,   // path_provider
     ),
   );
 
@@ -80,11 +78,11 @@ Storage never sees a token or a user id directly. It reads a token from the
 session on every request, so a rotated token is picked up automatically, and it
 scopes local state by the signed-in identity without being told who that is.
 
-Tuning that storage decides for itself lives on `WincheStorageConfig`, set once
+Tuning that storage decides for itself lives on `WincheStorageSettings`, set once
 immediately after obtaining the instance:
 
 ```dart
-WincheStorage.instance.config = const WincheStorageConfig(
+WincheStorage.instance.settings = const WincheStorageSettings(
   // Files larger than this are uploaded in parts. Defaults to 5 MiB.
   multipartThreshold: 5 * 1024 * 1024,
 
@@ -97,10 +95,13 @@ WincheStorage.instance.config = const WincheStorageConfig(
   retryMaxDelay: Duration(seconds: 30),
   retryMaxAttempts: 5,
   retryPollInterval: Duration(seconds: 30),
+
+  // Use storage while nobody is signed in. Defaults to false.
+  allowSignedOut: false,
 );
 ```
 
-Setting `config` after storage has been used throws a `StateError` — the values
+Setting `settings` after storage has been used throws a `StateError` — the values
 are read when a session is built, so a later change would apply to some sessions
 and not others.
 
@@ -116,7 +117,7 @@ There is no `close()`. Core tears a session down on sign-out and disposes the
 service with the app, in dependency order — one-shot transfers, then the
 upload queue, then the store — never waiting on the network. Durable uploads
 are left resumable; one-shot transfers fail with
-`StorageCancelledException`.
+a `WincheStorageException` with code `cancelled`.
 
 ## Multi-user
 
@@ -197,6 +198,20 @@ optional, not a precaution.
 crossed the wire, and being signed out is fixed by signing in rather than by
 handling it where server errors are handled. It *is* a `WincheException`, core's
 root for the whole stack, so `on WincheException` catches it.
+
+### Signed-out access
+
+To use storage while nobody is signed in — public files, or an app with no
+sign-in at all:
+
+```dart
+storage.settings = const WincheStorageSettings(allowSignedOut: true);
+```
+
+Requests then go without a token and the server's rules decide
+(`allow read: if true;`, `request.auth == null`). The signed-out session keeps
+its transfer queue in memory only, needs no auth service, and is replaced when
+someone signs in.
 
 ## How a transfer flows
 
@@ -290,10 +305,11 @@ Uploading to a path that already has a file:
 
 - **Completed file, identical size + MIME** — skipped; the existing record is
   returned without re-uploading.
-- **Completed file, different size or MIME** — replaced (the old object is
-  deleted and the new content uploaded).
+- **Completed file, different size or MIME** — replaced in one step: the
+  server replaces the record, and the old bytes stay readable until the new
+  upload is confirmed. Files under the path are untouched.
 - **Interrupted upload, identical size + MIME** — resumed from the last
-  completed part.
+  completed part (multipart uploads; a single-request upload starts over).
 - **Interrupted upload, different size or MIME** — discarded and re-uploaded
   from scratch (so a previously failed attempt never blocks the path).
 
@@ -445,7 +461,7 @@ for (final snap in listing.files) {
 #### Reads are always live; listings tell you what's cached
 
 `getSnapshot()` and `listChildren()` are server reads. They throw
-`StorageUnavailableException` when the server is unreachable — there is no
+a `WincheStorageException` with code `unavailable` when the server is unreachable — there is no
 metadata cache to fall back to. What they *do* carry is this device's cache
 state, per file:
 
@@ -492,7 +508,7 @@ a prefix from different content produces a file of exactly the right length.
 Available when a store is configured (see [Setup](#setup)). Uploads started with
 `enqueue: true` are persisted to a durable outbox, resumed when the SDK binds a
 session, and retried on failure with exponential backoff (configurable via the
-`retry*` fields on `WincheStorageConfig`).
+`retry*` fields on `WincheStorageSettings`).
 
 ```dart
 // `enqueue: true` makes it durable — queued, resumed after a restart, retried.
@@ -532,9 +548,9 @@ network destroy queued work in a couple of minutes.
 
 | Failure | Behaviour |
 | --- | --- |
-| `unauthenticated`, `unavailable`, and `WincheSessionExpired` | **Paused.** The record and the handle both survive, and **no attempt is counted** — a paused transfer can wait indefinitely without exhausting its budget. It keeps probing on the usual backoff, so a brief blip recovers in about a second. Emits `TransferEventType.paused`; the record's status becomes `TransferStatus.paused` with the reason in `lastError`. |
-| `internal`, `deadlineExceeded`, `unknown`, and any non-`WincheStorageException` | **Retried** with exponential backoff, up to `retryMaxAttempts`. Past the cap the handle fails; the record stays in the queue as `failed` so `pendingUploads()` still surfaces it. |
-| `permissionDenied`, `notFound`, `invalidArgument`, `failedPrecondition` | **Terminal.** The record is dropped and the handle fails. The `failed` event carries the full `TransferRecord` in `record`, so the work is recoverable — a path and an error alone would lose the source `localPath`, `mimeType` and `metadata`. |
+| `unauthenticated`, `unavailable`, `WincheSessionExpired`, and no answer at all (a dropped network) | **Paused.** The record and the handle both survive, and **no attempt is counted** — a paused transfer can wait indefinitely without exhausting its budget. It keeps probing on the usual backoff, so a brief blip recovers in about a second. Emits `TransferEventType.paused`; the record's status becomes `TransferStatus.paused` with the reason in `lastError`. |
+| `internal`, `deadlineExceeded`, `cancelled`, `aborted`, `resourceExhausted`, `dataLoss`, `unknown`, an HTTP error from the signed link (an expired link is a 403), and any other error | **Retried** with exponential backoff, up to `retryMaxAttempts`. Past the cap the handle fails; the record stays in the queue as `failed` so `pendingUploads()` still surfaces it. |
+| `permissionDenied`, `notFound`, `invalidArgument`, `failedPrecondition`, `alreadyExists`, `outOfRange`, `unimplemented` | **Terminal.** The record is dropped and the handle fails. The `failed` event carries the full `TransferRecord` in `record`, so the work is recoverable — a path and an error alone would lose the source `localPath`, `mimeType` and `metadata`. |
 
 A token refresh re-drives everything that paused, rather than waiting out the
 `retryPollInterval` backstop. That happens on its own: core announces the
@@ -568,9 +584,25 @@ final DirectorySnapshot dir = await storage.child('userFiles/user-123').listChil
 for (final snapshot in dir.files) {
   print('${snapshot.reference.path} — ${snapshot.data?.sizeBytes} bytes');
 }
+for (final folder in dir.folders) {
+  print('${folder.path}/');
+}
 ```
 
-`listChildren()` is a server read — it throws `StorageUnavailableException` when
+`listChildren()` reads every page; `list()` reads one: at most `maxResults` files and
+folders in name order, and `nextPageToken` for the next page.
+
+```dart
+var page = await storage.child('userFiles/user-123').list(maxResults: 100);
+while (page.nextPageToken != null) {
+  page = await storage.child('userFiles/user-123').list(maxResults: 100, pageToken: page.nextPageToken);
+}
+```
+
+`storage.child('')` lists the top. Paths have one form: `child()` drops stray slashes (`a//b/` is `a/b`) and refuses
+`.` and `..` segments.
+
+`listChildren()` and `list()` are server reads — it throws a `WincheStorageException` with code `unavailable` when
 offline, since listings are never cached. Each returned `FileSnapshot` carries
 `isCached` / `localPath` for this device, so one call tells you both what exists
 and what you already hold (see [File cache](#file-cache)).
@@ -593,7 +625,9 @@ if (snapshot.exists) {
   print(data.directory);
   print(data.mimeType);
   print(data.sizeBytes);
-  print(data.uploadStatus); // UploadStatus.pending | .complete | .failed
+  print(data.uploadStatus); // UploadStatus.pending | .complete
+  print(data.contentDisposition); // how downloads are offered, if set
+  print(data.cacheControl);       // how long downloads may be cached, if set
   print(data.metadata);
   print(data.version);
   print(data.createdAt);
@@ -604,18 +638,49 @@ if (snapshot.exists) {
 ### Update metadata
 
 ```dart
-final FileSnapshot updated = await photoRef.updateMetadata({'label': 'hero'});
+// Merges: sets label, removes draft, leaves other keys. Optionally changes download headers ('' clears one).
+final FileSnapshot updated = await photoRef.updateMetadata(
+  {'label': 'hero', 'draft': null},
+  cacheControl: 'public, max-age=3600',
+  ifVersion: snapshot.data!.version, // only if nobody changed it since
+);
 ```
 
 ### Delete
 
 ```dart
-final bool deleted = await photoRef.delete(); // false if the file didn't exist
+final bool deleted = await photoRef.delete(); // false if nothing was there
+await storage.child('userFiles/user-123/album').delete(); // a folder: everything under it, each file rule-checked
 ```
+
+### Files in database documents
+
+With `winche_database`, a document can point at a file: store it as a file reference with `Link.file(path)`, and a
+read that expands the field brings the file's record with the document (one request, live in listeners):
+
+```dart
+import 'package:winche_database/winche_database.dart';
+
+await db.doc('visits/v1').set({'scan': Link.file('scans/chest-xray.png')});
+
+final visit = await db.doc('visits/v1').expand(['scan']).get();
+final scan = visit.data()!['scan'] as Link;        // always a Link: kind LinkKind.file, target the path
+final file = scan.withConverter(Converter<FileData>(FileData.fromJson, (_) => {})).data();
+print(file?.sizeBytes);                            // the record, as getSnapshot() gives it
+final bytes = storage.child(scan.target);          // the bytes still come from storage
+```
+
+- The record is what `getSnapshot()` returns (type, size, metadata, upload status), never a download link: download
+  with `storage.child(link.target)` as usual.
+- `data()` is null when the field wasn't expanded, the file doesn't exist, or the storage rules don't let this user
+  `get` it; `target` is always there.
+- A listener on the document emits again when the file changes (uploaded, metadata updated, deleted).
+- A plain string path is never expanded: store paths with `Link.file`. Offline, expanded files show what the last
+  online read brought.
 
 ## API reference
 
-### `WincheStorageConfig`
+### `WincheStorageSettings`
 
 Set once, immediately after obtaining the instance; changing it after storage
 has been used throws a `StateError`.
@@ -628,6 +693,7 @@ has been used throws a `StateError`.
 | `retryMaxDelay` | `Duration` | `30s` | Cap on the exponential backoff between retries |
 | `retryMaxAttempts` | `int` | `5` | Retries before a transfer fails permanently |
 | `retryPollInterval` | `Duration` | `30s` | Backstop poll interval that re-drives still-retryable failed transfers, and every paused one |
+| `allowSignedOut` | `bool` | `false` | Use storage while nobody is signed in; see [Signed-out access](#signed-out-access) |
 
 ### `WincheStorage`
 
@@ -639,7 +705,7 @@ configured.
 | Member | Description |
 | --- | --- |
 | `WincheStorage.instance` | The storage attached to the default app, building it if needed. Returns bound when an identity is already signed in. Use `instanceFor(app)` for a named app. |
-| `config` | `WincheStorageConfig`. Settable until storage is first used, `StateError` after. |
+| `settings` | `WincheStorageSettings`. Settable until storage is first used, `StateError` after. (`config` is the deprecated old name.) |
 | `child(path)` | Returns a `ChildReference`. Never throws: the reference resolves its api and store when used. |
 | `resumeUploads()` | Re-drives every upload halted by a pause (expired token, unreachable server). Automatic on sign-in and on a token refresh — call it only for what the SDK cannot see, such as the OS reporting the network is back. |
 | `pendingUploads()` | Snapshot of the durable outbox (pending/running/paused/failed `TransferRecord`s). Uploads only — downloads are not persisted. |
@@ -657,11 +723,12 @@ configured.
 | `name` | The last path segment (e.g. `photo.jpg`). |
 | `parent` | The parent reference, or `null` at a single-segment path. |
 | `child(path)` | Returns a new `ChildReference` at `this.path/path`. |
-| `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws `StorageUnavailableException` when offline. |
+| `getSnapshot()` | Fetches the file's record from the **server**, annotated with this device's `isCached` / `localPath`; throws a `WincheStorageException` with code `unavailable` when offline. |
 | `listChildren({mimeType})` | Lists files under this path from the **server**, returning a `DirectorySnapshot` whose `.files` each carry `isCached` / `localPath`; throws when offline. For what is on disk without a network call, use `cachedFiles()`. |
+| `list({maxResults, pageToken, mimeType})` | Like `listChildren()`, but one page: a `DirectorySnapshot` with `nextPageToken` for the next. |
 | `cachedFile()` | `Future<CachedFile?>` — the local copy, or `null` when this device has no usable bytes. Never contacts the server; verified against the disk, so a returned `localPath` always opens. Requires a store. |
 | `cachedFiles()` | `Future<List<CachedFile>>` — the cached files **directly under** this path, sorted by path and each verified against the disk. Never contacts the server, so it is the one directory-shaped read that works offline. Empty when nothing here is cached. Requires a store. |
-| `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws `StorageNotFoundException` when the server has no record, and `StorageFailedPreconditionException` when it has a record but no bytes. Requires a store. |
+| `keepCached()` | `Future<CachedFile>` — caches this file's bytes, returning the existing copy when they are already complete. File-only. Throws a `WincheStorageException` with code `notFound` when the server has no record, and one with code `failedPrecondition` when it has a record but no bytes. Requires a store. |
 | `refreshCache()` | Unconditionally re-downloads the current remote version. Requires a store. |
 | `checkForUpdate()` | `Future<CacheStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `remoteIncomplete` / `unknown` (offline). **Round-trips**, unlike the other cache methods. Requires a store. |
 | `clearCache()` | Drops this file's cached bytes and catalog row. Requires a store. |
@@ -669,8 +736,8 @@ configured.
 | `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, cache})` | Starts an `UploadTask` from raw bytes. `cache: true` caches it. Not durable — use `uploadPath(enqueue: true)` for that. |
 | `download(saveTo)` | Starts a one-shot `DownloadTask` to the explicit path `saveTo`, with in-session retry. |
 | `resumeUpload()` | Resumes this path's queued/paused durable upload. Requires a store. |
-| `updateMetadata(metadata)` | Updates server-side metadata. Returns a `FileSnapshot` annotated with this device's cache state. If the file is cached, its cached metadata is updated too (content fingerprint preserved). |
-| `delete()` | Deletes the file. Returns `bool`. |
+| `updateMetadata(metadata, {ifVersion, contentDisposition, cacheControl})` | Merges into server-side metadata (a null value removes a key); `''` clears a download header; `ifVersion` only updates that version. Returns a `FileSnapshot` annotated with this device's cache state. If the file is cached, its cached metadata is updated too (content fingerprint preserved). |
+| `delete({ifVersion})` | Deletes the file and everything under its path, and this device's cached copies and queued uploads there. Returns `true` if anything was deleted. |
 
 Cache and durable-upload methods throw `StateError` when no store is configured
 (no `directoryResolver`, no `inMemory`, on native).
@@ -724,9 +791,10 @@ An immutable snapshot of a file's metadata at a point in time.
 *this device*, and `FileData` carries only what the server sent.
 
 `FileData` fields: `id`, `directory`, `path`, `mimeType`, `sizeBytes`,
-`uploadStatus`, `metadata`, `version`, `createdAt`, `updatedAt`, `contentHash`.
+`uploadStatus`, `metadata`, `version`, `createdAt`, `updatedAt`, `contentHash`,
+`contentDisposition`, `cacheControl`.
 
-`uploadStatus` — `pending`, `complete` or `failed`. The server's own statement
+`uploadStatus` — `pending` or `complete`. The server's own statement
 about whether the bytes exist; `keepCached()` refuses anything but `complete`.
 
 `contentHash` — the server's content fingerprint (object ETag), used by
@@ -734,12 +802,14 @@ about whether the bytes exist; `keepCached()` refuses anything but `complete`.
 
 ### `DirectorySnapshot`
 
-An immutable snapshot of a directory listing, returned by `listChildren()`.
+An immutable snapshot of a directory listing, returned by `listChildren()` and `list()`.
 Always the authoritative server listing — listings are never cached.
 
 | Member | Type | Description |
 | --- | --- | --- |
 | `files` | `List<FileSnapshot>` | One snapshot per child file (unmodifiable), each annotated with `isCached` / `localPath`. |
+| `folders` | `List<ChildReference>` | The folders directly under this path. |
+| `nextPageToken` | `String?` | From `list()`: the token for the next page, or null on the last. Always null from `listChildren()`. |
 | `reference` | `ChildReference` | The directory this snapshot lists. |
 | `name` | `String` | The directory's last path segment. |
 | `length` / `isEmpty` / `isNotEmpty` | — | Convenience over `files`. |
@@ -760,29 +830,28 @@ Always the authoritative server listing — listings are never cached.
 
 ### `WincheStorageException`
 
-A sealed exception hierarchy thrown on API errors. Each carries a semantic
-`status` (`StorageErrorStatus`), a `message`, optional `details`, and the
-originating `statusCode`.
+What storage throws when a request fails: a `WincheException` with a `code` from the list every Winche package shares
+(`WincheErrorCode`), a `message`, the server's `reason` when it sent a more precise one (`too-large`,
+`size-mismatch`, `upload-status`, `not-uploaded`), and the HTTP `statusCode`.
 
 ```dart
 try {
   await photoRef.updateMetadata({'label': 'hero'});
-} on StorageNotFoundException catch (e) {
-  print('not found: ${e.message}');
 } on WincheStorageException catch (e) {
-  print('${e.statusCode}: ${e.message}');
+  switch (e.code) {
+    case WincheErrorCode.notFound: print('not found: ${e.message}');
+    case WincheErrorCode.permissionDenied: print('not allowed');
+    default: if (e.isTransient) retryLater();
+  }
 }
 ```
 
-Subclasses: `StorageNotFoundException`, `StoragePermissionDeniedException`,
-`StorageUnauthenticatedException`, `StorageInvalidArgumentException`,
-`StorageFailedPreconditionException`, `StorageDeadlineExceededException`,
-`StorageUnavailableException`, `StorageCancelledException`,
-`StorageInternalException`, `StorageUnknownException`.
+The 5.x subclasses (`StorageNotFoundException`, `StorageUnavailableException`, …), `status` (`StorageErrorStatus`) and
+`details` still work, deprecated, until the next major version.
 
 ## Dependencies
 
-- [`dio`](https://pub.dev/packages/dio) — HTTP client used by `WincheStorageHttpApi`, `UploadTask`, and `DownloadTask`
+- [`http`](https://pub.dev/packages/http) — through `winche_core`'s `app.http` for the API, and streamed requests for the bytes to and from signed links
 - [`mime`](https://pub.dev/packages/mime) — MIME type inference from file extension in `ChildReference.uploadPath`
 - [`path`](https://pub.dev/packages/path) — platform-correct path joining for the file cache
 - [`sembast`](https://pub.dev/packages/sembast) / [`sembast_web`](https://pub.dev/packages/sembast_web) — pure-Dart durable store for the cache catalog and upload queue (native file / web IndexedDB)

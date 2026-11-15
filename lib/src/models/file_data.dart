@@ -17,6 +17,12 @@ final class FileData {
   /// metadata-only change. Null when the server hasn't recorded one.
   final String? contentHash;
 
+  /// How downloads are offered (e.g. `attachment; filename="a.pdf"`), if set.
+  final String? contentDisposition;
+
+  /// How long downloads may be cached (e.g. `public, max-age=3600`), if set.
+  final String? cacheControl;
+
   const FileData({
     required this.id,
     required this.directory,
@@ -29,6 +35,8 @@ final class FileData {
     required this.sizeBytes,
     required this.uploadStatus,
     this.contentHash,
+    this.contentDisposition,
+    this.cacheControl,
   });
 
   factory FileData.fromJson(Map<String, dynamic> json) {
@@ -44,6 +52,8 @@ final class FileData {
       sizeBytes: json['sizeBytes'] as int,
       uploadStatus: UploadStatus.values.byName(json['uploadStatus'] as String),
       contentHash: json['contentHash'] as String?,
+      contentDisposition: json['contentDisposition'] as String?,
+      cacheControl: json['cacheControl'] as String?,
     );
   }
 
@@ -65,6 +75,8 @@ final class FileData {
       sizeBytes: sizeBytes,
       uploadStatus: uploadStatus ?? this.uploadStatus,
       contentHash: contentHash ?? this.contentHash,
+      contentDisposition: contentDisposition,
+      cacheControl: cacheControl,
     );
   }
 
@@ -80,5 +92,7 @@ final class FileData {
         'sizeBytes': sizeBytes,
         'uploadStatus': uploadStatus.name,
         'contentHash': contentHash,
+        if (contentDisposition != null) 'contentDisposition': contentDisposition,
+        if (cacheControl != null) 'cacheControl': cacheControl,
       };
 }

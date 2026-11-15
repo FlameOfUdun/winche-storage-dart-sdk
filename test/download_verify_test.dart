@@ -1,11 +1,11 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import 'support/noop_api.dart';
+import 'support/fake_http.dart';
 
 class _DownloadApi extends NoopApi {
   _DownloadApi(this.recordSize);
@@ -36,35 +36,14 @@ class _DownloadApi extends NoopApi {
   Future<FileData?> getFile(String path) async => _record();
 }
 
-/// Serves [body] with a Content-Length header of [contentLength].
-class _BytesAdapter implements HttpClientAdapter {
-  _BytesAdapter(this.body, {int? contentLength})
-      : contentLength = contentLength ?? body.length;
-
-  final List<int> body;
-  final int contentLength;
-
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
-    return ResponseBody.fromBytes(body, 200, headers: {
-      Headers.contentLengthHeader: [contentLength.toString()],
-    });
-  }
-
-  @override
-  void close({bool force = false}) {}
-}
-
 DownloadTask _start(_DownloadApi api, List<int> body, String saveTo,
     {int? contentLength}) {
-  final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-    ..httpClientAdapter = _BytesAdapter(body, contentLength: contentLength);
   return DownloadTask.start(
     reference: ChildReference(path: 'a/b', api: api),
     saveTo: saveTo,
     maxRetries: 0,
-    httpClient: dio,
+    // Serves [body] with a Content-Length of [contentLength].
+    httpClient: fakeHttp((_) => respond(body, contentLength: contentLength ?? body.length)),
   );
 }
 

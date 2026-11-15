@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/transfer_controller.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 class _UpApi extends NoopApi {
   FileData? _rec;
@@ -15,7 +14,11 @@ class _UpApi extends NoopApi {
   Future<FileData?> getFile(String path) async => _rec;
   @override
   Future<FileData> setFile(String path, String mime, int size,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _rec = FileData(
         id: 'id', directory: 'd', path: path,
         createdAt: DateTime.utc(2026, 1, 1), updatedAt: DateTime.utc(2026, 1, 1),
@@ -31,19 +34,14 @@ class _UpApi extends NoopApi {
 }
 
 /// Blocks the PUT on [gate]; signals [reached] once the PUT is in-flight.
-class _GatedAdapter implements HttpClientAdapter {
+class _GatedAdapter {
   final gate = Completer<void>();
   final reached = Completer<void>();
-  @override
-  Future<ResponseBody> fetch(RequestOptions o, Stream<Uint8List>? s,
-      Future<void>? c) async {
+  late final http = fakeHttp((_) async {
     if (!reached.isCompleted) reached.complete();
     await gate.future;
-    return ResponseBody.fromBytes(const [], 200);
-  }
-
-  @override
-  void close({bool force = false}) {}
+    return respond(const []);
+  });
 }
 
 void main() {
@@ -60,8 +58,7 @@ void main() {
       store: MemoryStorageLocalStore(),
       multipartThreshold: 5 * 1024 * 1024,
       directoryResolver: () async => tmp.path,
-      httpClient: Dio(BaseOptions(validateStatus: (s) => s != null))
-        ..httpClientAdapter = adapter,
+      httpClient: adapter.http,
       retry: const TransferRetryConfig(pollInterval: Duration(hours: 1)),
     );
     final src = File('${tmp.path}/s.txt')..writeAsBytesSync([1, 2, 3]);

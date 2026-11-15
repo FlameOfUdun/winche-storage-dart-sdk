@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
+import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_api.dart';
 import '../api/winche_storage_exception.dart';
@@ -30,7 +30,7 @@ class OfflineCatalog implements UploadPinSink {
     required Future<String> Function()? directoryResolver,
     int multipartThreshold = 5 * 1024 * 1024, // accepted for API symmetry; downloads don't use it
     LiveTaskRegistry? registry,
-    Dio? httpClient,
+    WincheHttp? httpClient,
   })  : _api = api,
         _store = store,
         _directoryResolver = directoryResolver,
@@ -50,7 +50,7 @@ class OfflineCatalog implements UploadPinSink {
   /// partial plus a whole second copy.
   final LiveTaskRegistry? _registry;
 
-  final Dio? _httpClient;
+  final WincheHttp? _httpClient;
 
   /// In-flight downloads keyed by path — de-dups concurrent cache/refresh calls.
   final Map<String, Future<CachedFile>> _activePins = {};
@@ -160,19 +160,17 @@ class OfflineCatalog implements UploadPinSink {
   Future<CachedFile> _doDownload(ChildReference ref) async {
     final remote = await _api.getFile(ref.path);
     if (remote == null) {
-      throw StorageNotFoundException('No file at "${ref.path}".');
+      throw WincheStorageException.of(WincheErrorCode.notFound, 'No file at "${ref.path}".');
     }
     // uploadStatus is the server's own statement about whether bytes exist.
     // contentHash being null is a symptom of the same thing, so key on the
     // statement rather than on the symptom.
     if (remote.uploadStatus != UploadStatus.complete) {
-      throw StorageFailedPreconditionException(
-        remote.uploadStatus == UploadStatus.pending
-            ? 'The file at "${ref.path}" is still uploading, so there are no '
-                'bytes to cache yet. To cache a file you are uploading, use '
-                'uploadPath(..., cache: true).'
-            : 'The upload for "${ref.path}" failed, so the server has no bytes '
-                'to serve. It must be re-uploaded before it can be cached.',
+      throw WincheStorageException.of(
+        WincheErrorCode.failedPrecondition,
+        'The file at "${ref.path}" is still uploading, so there are no '
+        'bytes to cache yet. To cache a file you are uploading, use '
+        'uploadPath(..., cache: true).',
       );
     }
 

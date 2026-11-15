@@ -1,13 +1,12 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/offline_catalog.dart';
 import 'package:winche_storage/src/offline/transfer_controller.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 class _PinApi extends NoopApi {
   FileData? _existing;
@@ -27,7 +26,11 @@ class _PinApi extends NoopApi {
   Future<FileData?> getFile(String path) async => _existing;
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _existing = _rec(sizeBytes, UploadStatus.pending);
   @override
   Future<UploadSession> generateFileUploadUrl(String path) async =>
@@ -35,15 +38,6 @@ class _PinApi extends NoopApi {
   @override
   Future<FileData> confirmUpload(String path) async =>
       _existing!.copyWith(uploadStatus: UploadStatus.complete);
-}
-
-class _OkAdapter implements HttpClientAdapter {
-  @override
-  Future<ResponseBody> fetch(RequestOptions o, Stream<Uint8List>? s,
-          Future<void>? c) async =>
-      ResponseBody.fromBytes(<int>[], 200);
-  @override
-  void close({bool force = false}) {}
 }
 
 void main() {
@@ -55,14 +49,12 @@ void main() {
       () async {
     final api = _PinApi();
     final store = MemoryStorageLocalStore();
-    final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-      ..httpClientAdapter = _OkAdapter();
     final ctrl = TransferController(
       api: api,
       store: store,
       multipartThreshold: 5 * 1024 * 1024,
       directoryResolver: () async => tmp.path,
-      httpClient: dio,
+      httpClient: okHttp(),
       retry: const TransferRetryConfig(pollInterval: Duration(hours: 1)),
     );
     final catalog = OfflineCatalog(

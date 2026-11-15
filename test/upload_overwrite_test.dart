@@ -1,10 +1,10 @@
 import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import 'support/noop_api.dart';
+import 'support/fake_http.dart';
 
 /// Captures the record-handling and transfer-path decisions [UploadTask] makes.
 class _UploadApi extends NoopApi {
@@ -36,13 +36,17 @@ class _UploadApi extends NoopApi {
 
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-      {Map<String, dynamic>? metadata}) async {
+      {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async {
     calls.add('setFile($sizeBytes)');
     return existing = _record(sizeBytes, mimeType, UploadStatus.pending);
   }
 
   @override
-  Future<bool> deleteFile(String path) async {
+  Future<bool> deleteFile(String path, {int? ifVersion}) async {
     calls.add('deleteFile');
     existing = null;
     parts = const [];
@@ -82,19 +86,6 @@ class _UploadApi extends NoopApi {
 }
 
 /// Returns HTTP 200 for every PUT so the upload progresses.
-class _OkAdapter implements HttpClientAdapter {
-  int puts = 0;
-
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
-    puts++;
-    return ResponseBody.fromBytes(<int>[], 200);
-  }
-
-  @override
-  void close({bool force = false}) {}
-}
 
 UploadTask _start(
   _UploadApi api,
@@ -102,14 +93,12 @@ UploadTask _start(
   String mime = 'image/png',
   int threshold = 5 * 1024 * 1024,
 }) {
-  final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-    ..httpClientAdapter = _OkAdapter();
   return UploadTask.startFromBytes(
     reference: ChildReference(path: 'a/b', api: api),
     bytes: bytes,
     mimeType: mime,
     multipartThreshold: threshold,
-    httpClient: dio,
+    httpClient: okHttp(),
   );
 }
 
@@ -136,13 +125,13 @@ void main() {
       expect(api.calls, ['getFile']);
     });
 
-    test('complete + different size: delete + setFile + re-upload', () async {
+    test('complete + different size: setFile replaces + re-upload', () async {
       final api = _UploadApi()
         ..existing =
             _UploadApi()._record(10, 'image/png', UploadStatus.complete);
       await _start(api, Uint8List(3)).whenDone;
       expect(
-          api.calls, ['getFile', 'deleteFile', 'setFile(3)', 'upload', 'confirm']);
+          api.calls, ['getFile', 'setFile(3)', 'upload', 'confirm']);
     });
 
     test('incomplete + matching: re-upload whole object (no parts)', () async {
@@ -159,7 +148,7 @@ void main() {
             _UploadApi()._record(10, 'image/png', UploadStatus.pending);
       await _start(api, Uint8List(3)).whenDone;
       expect(
-          api.calls, ['getFile', 'deleteFile', 'setFile(3)', 'upload', 'confirm']);
+          api.calls, ['getFile', 'setFile(3)', 'upload', 'confirm']);
     });
   });
 

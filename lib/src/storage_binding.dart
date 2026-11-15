@@ -32,7 +32,15 @@ final class StorageBinding {
   /// mark itself used and refuse further config changes.
   final void Function() onUse;
 
-  StorageBinding({required this.registry, required this.onUse});
+  /// Binds a signed-out session when allowed (`WincheStorageSettings.allowSignedOut`);
+  /// returns whether it did.
+  final bool Function()? bindSignedOut;
+
+  StorageBinding({required this.registry, required this.onUse, this.bindSignedOut, this.transfers});
+
+  /// The client one-shot transfers send their bytes through (the app's), or
+  /// null for the shared fallback.
+  final WincheHttp? transfers;
 
   WincheStorageApi? _api;
   OfflineCatalog? _catalog;
@@ -70,7 +78,8 @@ final class StorageBinding {
   /// on a reference goes through here, which is what makes an unbound
   /// reference fail on use rather than on construction.
   WincheStorageApi get api {
-    final api = _api;
+    var api = _api;
+    if (api == null && (bindSignedOut?.call() ?? false)) api = _api;
     if (api == null) throw WincheUnboundException();
     onUse();
     return api;

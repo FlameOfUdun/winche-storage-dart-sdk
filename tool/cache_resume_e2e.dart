@@ -21,7 +21,7 @@ import 'dart:typed_data';
 import 'package:winche_core/winche_core.dart';
 import 'package:winche_storage/winche_storage.dart';
 
-const _endpoint = 'http://localhost:5209/files';
+const _endpoint = 'http://localhost:5209/files/v1';
 const _uid = 'alice';
 
 var _passed = 0;
@@ -39,7 +39,7 @@ void check(String label, bool ok, [String? detail]) {
 
 /// Announces a fixed identity; the sample server takes the bearer token
 /// verbatim as the uid.
-final class _Auth extends WincheAuthService {
+final class _Auth extends WincheService with WincheIdentitySource {
   _Auth(super.app);
   WincheIdentity? _identity;
 
@@ -62,7 +62,7 @@ Future<(WincheApp, WincheStorage)> launch(String dir) async {
   final app = WincheApp(
     'resume-e2e-${DateTime.now().microsecondsSinceEpoch}',
     options: WincheOptions(
-      storageEndpoint: Uri.parse(_endpoint),
+      endpoints: {'storage': Uri.parse(_endpoint)},
       directoryResolver: () async => dir,
     ),
   );

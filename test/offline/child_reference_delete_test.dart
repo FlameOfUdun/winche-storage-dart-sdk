@@ -11,7 +11,7 @@ import '../support/noop_api.dart';
 class _DeleteApi extends NoopApi {
   int deletes = 0;
   @override
-  Future<bool> deleteFile(String path) async {
+  Future<bool> deleteFile(String path, {int? ifVersion}) async {
     deletes++;
     return true;
   }

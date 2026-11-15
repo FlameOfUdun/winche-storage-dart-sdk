@@ -34,10 +34,11 @@ class _DirApi extends NoopApi {
       children.contains(path) ? _rec(path) : null;
 
   @override
-  Future<List<FileData>> listDirectory(String directory,
-      {String? mimeType}) async {
+  Future<FileListPage> list(String directory,
+      {int? maxResults, String? pageToken, String? mimeType}) async {
     listed = true;
-    return [for (final p in children) _rec(p)];
+    return FileListPage(
+        items: [for (final p in children) _rec(p)], prefixes: const []);
   }
 }
 

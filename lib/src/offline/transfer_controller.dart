@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:dio/dio.dart';
+import 'package:winche_core/winche_core.dart';
 
 import '../api/winche_storage_api.dart';
 import '../child_reference.dart';
@@ -32,7 +32,7 @@ class TransferController {
     required int multipartThreshold,
     Future<String> Function()? directoryResolver,
     TransferRetryConfig retry = const TransferRetryConfig(),
-    Dio? httpClient,
+    WincheHttp? httpClient,
   })  : _api = api,
         _queue = TransferQueue(store),
         _multipartThreshold = multipartThreshold,
@@ -47,7 +47,7 @@ class TransferController {
   final int _multipartThreshold;
   final Future<String> Function()? _directoryResolver;
   final TransferRetryConfig _retry;
-  final Dio? _httpClient;
+  final WincheHttp? _httpClient;
 
   final _events = StreamController<TransferEvent>.broadcast();
   final Set<int> _running = {};

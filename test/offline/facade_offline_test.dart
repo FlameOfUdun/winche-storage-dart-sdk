@@ -21,7 +21,7 @@ void main() {
     // which of the two knobs turns it on.
     final app = WincheApp(
       'stateless',
-      options: WincheOptions(storageEndpoint: Uri.parse('https://x/f')),
+      options: WincheOptions(endpoints: {'storage': Uri.parse('https://x/f')}),
     );
     addTearDown(app.dispose);
     final auth = ScriptedAuthService(app);
@@ -38,12 +38,12 @@ void main() {
   test('inMemory needs no directory and wires the queue', () async {
     final app = WincheApp(
       'in-memory',
-      options: WincheOptions(storageEndpoint: Uri.parse('https://x/f')),
+      options: WincheOptions(endpoints: {'storage': Uri.parse('https://x/f')}),
     );
     addTearDown(app.dispose);
     final auth = ScriptedAuthService(app);
     final storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(inMemory: true);
+      ..settings = const WincheStorageSettings(inMemory: true);
 
     auth.announce(WincheIdentity('user-1'));
     await app.settled;
@@ -66,7 +66,7 @@ void main() {
     final app = WincheApp('facade-pin');
     addTearDown(app.dispose);
     final storage = WincheStorage(app)
-      ..config = const WincheStorageConfig(
+      ..settings = const WincheStorageSettings(
         retryMaxAttempts: 0,
         retryPollInterval: Duration(hours: 1),
       );

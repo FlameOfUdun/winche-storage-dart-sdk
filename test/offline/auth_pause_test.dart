@@ -24,8 +24,12 @@ class _FailingApi extends NoopApi {
 
   @override
   Future<FileData> setFile(String path, String mime, int size,
-          {Map<String, dynamic>? metadata}) =>
-      throw const StorageUnavailableException('stop here');
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) =>
+      throw StorageUnavailableException('stop here');
 }
 
 Future<void> _until(Future<bool> Function() condition,
@@ -72,7 +76,7 @@ void main() {
   }
 
   test('an expired token pauses without spending an attempt', () async {
-    final api = _FailingApi(const StorageUnauthenticatedException('expired'));
+    final api = _FailingApi(StorageUnauthenticatedException('expired'));
     final ctrl = build(api);
     final events = <TransferEvent>[];
     ctrl.events.listen(events.add);
@@ -97,7 +101,7 @@ void main() {
   });
 
   test('the paused handle stays alive — whenDone does not settle', () async {
-    final api = _FailingApi(const StorageUnauthenticatedException('expired'));
+    final api = _FailingApi(StorageUnauthenticatedException('expired'));
     final ctrl = build(api);
     final task = start(ctrl, api);
     var settled = false;
@@ -116,14 +120,14 @@ void main() {
   });
 
   test('resumeUploads re-drives once the token is refreshed', () async {
-    final api = _FailingApi(const StorageUnauthenticatedException('expired'));
+    final api = _FailingApi(StorageUnauthenticatedException('expired'));
     // A long base delay parks the probe, so the resume is what moves it.
     final ctrl = build(api, base: const Duration(seconds: 30));
     start(ctrl, api);
     await _until(() async => (await only(ctrl))?.status == TransferStatus.paused);
 
     final before = api.calls;
-    api.error = const StorageUnavailableException('now merely offline');
+    api.error = StorageUnavailableException('now merely offline');
     await ctrl.resumeUploads();
 
     await _until(() async => api.calls > before);
@@ -131,7 +135,7 @@ void main() {
   });
 
   test('being offline survives well past the attempt cap', () async {
-    final api = _FailingApi(const StorageUnavailableException('offline'));
+    final api = _FailingApi(StorageUnavailableException('offline'));
     final ctrl = build(api, maxAttempts: 2);
     final task = start(ctrl, api);
 
@@ -148,7 +152,7 @@ void main() {
 
   test('permission denied is terminal and its event carries the record',
       () async {
-    final api = _FailingApi(const StoragePermissionDeniedException('nope'));
+    final api = _FailingApi(StoragePermissionDeniedException('nope'));
     final ctrl = build(api);
     final events = <TransferEvent>[];
     ctrl.events.listen(events.add);
@@ -185,7 +189,7 @@ void main() {
   });
 
   test('the backstop poll re-drives a paused transfer unaided', () async {
-    final api = _FailingApi(const StorageUnauthenticatedException('expired'));
+    final api = _FailingApi(StorageUnauthenticatedException('expired'));
     final ctrl = TransferController(
       api: api,
       store: MemoryStorageLocalStore(),

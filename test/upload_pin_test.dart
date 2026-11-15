@@ -1,12 +1,11 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/offline_catalog.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import 'support/noop_api.dart';
+import 'support/fake_http.dart';
 
 /// Minimal upload API: getFile->null, setFile->pending, confirm->complete.
 /// generateDownloadUrl deliberately throws so a test can assert no download.
@@ -31,7 +30,11 @@ class _PinApi extends NoopApi {
   Future<FileData?> getFile(String path) async => _existing;
   @override
   Future<FileData> setFile(String path, String mimeType, int sizeBytes,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _existing = _rec(sizeBytes, mimeType, UploadStatus.pending);
   @override
   Future<UploadSession> generateFileUploadUrl(String path) async =>
@@ -46,22 +49,11 @@ class _PinApi extends NoopApi {
   }
 }
 
-class _OkAdapter implements HttpClientAdapter {
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-          Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async =>
-      ResponseBody.fromBytes(<int>[], 200);
-  @override
-  void close({bool force = false}) {}
-}
-
 void main() {
   late Directory tmp;
   setUp(() => tmp = Directory.systemTemp.createTempSync('winche-pin'));
   tearDown(() => tmp.deleteSync(recursive: true));
 
-  Dio okDio() => Dio(BaseOptions(validateStatus: (s) => s != null))
-    ..httpClientAdapter = _OkAdapter();
 
   test('pinned uploadPath stages, uploads from the copy, then finalizes',
       () async {
@@ -76,7 +68,7 @@ void main() {
       localPath: src.path,
       mimeType: 'image/png',
       multipartThreshold: 5 * 1024 * 1024,
-      httpClient: okDio(),
+      httpClient: okHttp(),
       stageSource: () async {
         staged = true;
         final dst = '${tmp.path}/staged.bin';
@@ -111,7 +103,7 @@ void main() {
       localPath: src.path,
       mimeType: 'image/png',
       multipartThreshold: 5 * 1024 * 1024,
-      httpClient: okDio(),
+      httpClient: okHttp(),
       stageSource: () async => throw StateError('disk full'),
       onPinFinalize: (c) async => fail('should not finalize without a stage'),
       onPinDeferred: (c) async => deferred = c,
@@ -143,7 +135,7 @@ void main() {
       localPath: src.path,
       mimeType: 'image/png',
       multipartThreshold: 5 * 1024 * 1024,
-      httpClient: okDio(),
+      httpClient: okHttp(),
       stageSource: () => cat.stageForUpload(ref, sourcePath: src.path),
       onPinFinalize: (c) => cat.finalizePin(ref, c),
       onPinDeferred: (c) => cat.markPinDeferred(ref, c),
@@ -169,7 +161,7 @@ void main() {
       localPath: src.path,
       mimeType: 'image/png',
       multipartThreshold: 5 * 1024 * 1024,
-      httpClient: okDio(),
+      httpClient: okHttp(),
       stageSource: () async => throw StateError('disk full'),
       onPinFinalize: (c) => cat.finalizePin(ref, c),
       onPinDeferred: (c) => cat.markPinDeferred(ref, c),

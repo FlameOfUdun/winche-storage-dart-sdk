@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/tasks/upload_task.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 class _UpApi extends NoopApi {
   _UpApi(this.fail);
@@ -15,13 +14,17 @@ class _UpApi extends NoopApi {
   FileData? _rec;
   @override
   Future<FileData?> getFile(String path) async {
-    if (fail) throw const StorageUnavailableException('offline');
+    if (fail) throw StorageUnavailableException('offline');
     return _rec;
   }
 
   @override
   Future<FileData> setFile(String path, String mime, int size,
-          {Map<String, dynamic>? metadata}) async =>
+          {Map<String, dynamic>? metadata,
+      bool ifNotExists = false,
+      int? ifVersion,
+      String? contentDisposition,
+      String? cacheControl}) async =>
       _rec = FileData(
         id: 'id', directory: 'd', path: path,
         createdAt: DateTime.utc(2026, 1, 1), updatedAt: DateTime.utc(2026, 1, 1),
@@ -36,29 +39,18 @@ class _UpApi extends NoopApi {
       _rec!.copyWith(uploadStatus: UploadStatus.complete);
 }
 
-class _OkAdapter implements HttpClientAdapter {
-  @override
-  Future<ResponseBody> fetch(RequestOptions o, Stream<Uint8List>? s,
-          Future<void>? c) async =>
-      ResponseBody.fromBytes(const [], 200);
-  @override
-  void close({bool force = false}) {}
-}
-
 void main() {
   late Directory tmp;
   setUp(() => tmp = Directory.systemTemp.createTempSync('winche-up-managed'));
   tearDown(() => tmp.deleteSync(recursive: true));
 
-  Dio dio() => Dio(BaseOptions(validateStatus: (s) => s != null))
-    ..httpClientAdapter = _OkAdapter();
   File src() => File('${tmp.path}/s.txt')..writeAsBytesSync([1, 2, 3]);
 
   test('managed upload starts queued', () {
     final task = ManagedUploadTask(
       reference: ChildReference(path: 'a/b', api: _UpApi(true)),
       localPath: src().path, mimeType: 'text/plain',
-      multipartThreshold: 5 * 1024 * 1024, httpClient: dio(),
+      multipartThreshold: 5 * 1024 * 1024, httpClient: okHttp(),
     );
     expect(task.state.status, UploadTaskStatus.queued);
   });
@@ -67,7 +59,7 @@ void main() {
     final task = ManagedUploadTask(
       reference: ChildReference(path: 'a/b', api: _UpApi(true)),
       localPath: src().path, mimeType: 'text/plain',
-      multipartThreshold: 5 * 1024 * 1024, httpClient: dio(),
+      multipartThreshold: 5 * 1024 * 1024, httpClient: okHttp(),
     );
     await expectLater(task.runOnce(), throwsA(isA<Object>()));
     expect(task.state.status, UploadTaskStatus.queued);
@@ -83,7 +75,7 @@ void main() {
     final task = ManagedUploadTask(
       reference: ChildReference(path: 'a/b', api: _UpApi(false)),
       localPath: src().path, mimeType: 'text/plain',
-      multipartThreshold: 5 * 1024 * 1024, httpClient: dio(),
+      multipartThreshold: 5 * 1024 * 1024, httpClient: okHttp(),
     );
     await task.runOnce();
     expect(task.state.status, UploadTaskStatus.complete);

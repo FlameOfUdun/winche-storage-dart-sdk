@@ -108,13 +108,13 @@ void main() {
       app = WincheApp(
         'identity-scope',
         options: WincheOptions(
-          storageEndpoint: Uri.parse('http://127.0.0.1:1/f'),
+          endpoints: {'storage': Uri.parse('http://127.0.0.1:1/f')},
           directoryResolver: () async => tmp.path,
         ),
       );
       auth = ScriptedAuthService(app);
       storage = WincheStorage(app)
-        ..config = const WincheStorageConfig(
+        ..settings = const WincheStorageSettings(
           retryPollInterval: Duration(hours: 1),
         );
     });

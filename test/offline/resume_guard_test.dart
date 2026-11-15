@@ -1,12 +1,11 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 import 'package:winche_storage/src/offline/offline_catalog.dart';
 import 'package:winche_storage/winche_storage.dart';
 
 import '../support/noop_api.dart';
+import '../support/fake_http.dart';
 
 FileData _remote({required String hash, int size = 6}) => FileData(
       id: 'id-a_b.png',
@@ -35,21 +34,12 @@ class _Api extends NoopApi {
 }
 
 /// Captures the request headers and serves the full 6-byte body.
-class _CapturingAdapter implements HttpClientAdapter {
+class _CapturingAdapter {
   final headers = <String, List<String>>{};
-
-  @override
-  Future<ResponseBody> fetch(RequestOptions options,
-      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
-    options.headers.forEach((k, v) => headers[k] = ['$v']);
-    return ResponseBody.fromBytes([9, 9, 9, 9, 9, 9], 200, headers: {
-      Headers.contentLengthHeader: ['6'],
-      'etag': ['"new-etag"'],
-    });
-  }
-
-  @override
-  void close({bool force = false}) {}
+  late final http = fakeHttp((request) {
+    request.headers.forEach((k, v) => headers[k.toLowerCase()] = [v]);
+    return respond([9, 9, 9, 9, 9, 9], headers: {'etag': '"new-etag"'});
+  });
 }
 
 void main() {
@@ -72,13 +62,11 @@ void main() {
   }) async {
     final api = _Api(serverHash);
     final adapter = _CapturingAdapter();
-    final dio = Dio(BaseOptions(validateStatus: (s) => s != null))
-      ..httpClientAdapter = adapter;
     final catalog = OfflineCatalog(
       api: api,
       store: MemoryStorageLocalStore(),
       directoryResolver: () async => tmp.path,
-      httpClient: dio,
+      httpClient: adapter.http,
     );
     // Mirrors what _cachePath produces for this record.
     final local = '${tmp.path}/cache/id-a_b.png';
@@ -108,7 +96,7 @@ void main() {
 
     expect(File(local).readAsBytesSync(), [9, 9, 9, 9, 9, 9],
         reason: 'the stale prefix survived into the cached file');
-    expect(adapter.headers.containsKey('Range'), isFalse,
+    expect(adapter.headers.containsKey('range'), isFalse,
         reason: 'resumed from a partial the server had invalidated');
   });
 
@@ -119,10 +107,10 @@ void main() {
     final ref = ChildReference(path: 'a/b.png', api: _Api('SAME'));
     await catalog.refresh(ref);
 
-    expect(adapter.headers['Range'], ['bytes=3-']);
+    expect(adapter.headers['range'], ['bytes=3-']);
     // Second layer: even with a matching hash, the server gets the chance to
     // say the object changed by answering 200 instead of 206.
-    expect(adapter.headers['If-Range'], ['"old-etag"']);
+    expect(adapter.headers['if-range'], ['"old-etag"']);
   });
 
   test('the ETag from the response is stored for the next resume', () async {

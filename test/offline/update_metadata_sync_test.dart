@@ -12,7 +12,8 @@ import '../support/noop_api.dart';
 class _MetaApi extends NoopApi {
   @override
   Future<FileData> updateMetadata(
-          String path, Map<String, dynamic> metadata) async =>
+          String path, Map<String, dynamic> metadata,
+      {int? ifVersion, String? contentDisposition, String? cacheControl}) async =>
       FileData(
         id: 'id1',
         directory: 'd',
