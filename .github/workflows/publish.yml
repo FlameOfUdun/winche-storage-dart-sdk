@@ -1,0 +1,16 @@
+name: Publish to pub.dev
+
+# Push a tag v<version> (the version in pubspec.yaml, e.g. v1.2.0) to publish this package. pub.dev checks the tag
+# matches the version, and trusts GitHub's identity token for this repository: no token is stored here.
+# Packages depend on winche_core through pub.dev, so release winche_core first.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  publish:
+    permissions:
+      id-token: write   # pub.dev automated publishing (OIDC)
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
