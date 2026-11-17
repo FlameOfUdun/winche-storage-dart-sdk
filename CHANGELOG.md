@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 6.1.0
+
+- **`pruneCache(keep:)`** on a reference drops this device's cached copies of files under it (at any depth) that
+  aren't in `keep`, and returns the paths dropped. For files that documents point at: after reading the documents,
+  prune their folder keeping the paths they still reference, so a replaced or deleted file's copy doesn't stay on the
+  device. Files with a queued upload or a download in flight are kept. Never contacts the server.
+
 ## 6.0.0
 
 On `winche_core` 1.0. Also contains 5.1.5 and 5.2.0, which were not released.

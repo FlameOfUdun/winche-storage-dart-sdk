@@ -285,6 +285,23 @@ class OfflineCatalog implements UploadPinSink {
     await _store.removeCatalog(path);
   }
 
+  /// Drops the cached files under [directory] (at any depth) whose paths are
+  /// not in [keep], skipping [busy] paths and downloads in flight. Returns the
+  /// dropped paths, sorted.
+  Future<List<String>> prune(String directory, Set<String> keep,
+      {Set<String> busy = const {}}) async {
+    final dropped = <String>[];
+    for (final entry in await all()) {
+      final p = entry.path;
+      if (!p.startsWith('$directory/')) continue;
+      if (keep.contains(p) || busy.contains(p) || _activePins.containsKey(p)) continue;
+      await evict(p);
+      dropped.add(p);
+    }
+    dropped.sort();
+    return dropped;
+  }
+
   /// Deletes every cached file.
   Future<void> clear() async {
     for (final entry in await all()) {

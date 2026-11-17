@@ -12,6 +12,7 @@ import 'offline/catalog_entry.dart';
 import 'offline/live_task_registry.dart';
 import 'offline/offline_catalog.dart';
 import 'offline/transfer_controller.dart';
+import 'offline/transfer_record.dart';
 import 'storage_binding.dart';
 import 'tasks/download_task.dart';
 import 'tasks/upload_task.dart';
@@ -444,6 +445,30 @@ final class ChildReference {
   /// Drops this file's cached bytes and its catalog row. A no-op when it is not
   /// cached. Requires a configured store.
   Future<void> clearCache() => _requireCatalog().evict(path);
+
+  /// Drops this device's cached copies of files under this path (at any depth)
+  /// that are not in [keep], and returns the paths dropped. Never contacts the
+  /// server, and never touches the files on the server.
+  ///
+  /// For files a document points at: when the document's reference moves to a
+  /// new file, or the document is gone, its old file's copy stays on the
+  /// device (nothing is evicted automatically). After reading the documents,
+  /// prune their folder, keeping the paths they still reference:
+  ///
+  /// ```dart
+  /// await storage.child('users/$uid/themes')
+  ///     .pruneCache(keep: themes.map((t) => t.logo?.target).nonNulls);
+  /// ```
+  ///
+  /// A file with a queued or running upload, or a download in flight, is kept
+  /// whatever [keep] says. Requires a configured store.
+  Future<List<String>> pruneCache({required Iterable<String> keep}) async {
+    final catalog = _requireCatalog();
+    final busy = {
+      for (final r in await controller?.pendingUploads() ?? const <TransferRecord>[]) r.path,
+    };
+    return catalog.prune(path, keep.toSet(), busy: busy);
+  }
 
   /// Compares the cached copy against the server's current record: `upToDate`,
   /// `contentChanged` (re-fetch via [refreshCache]), `remoteDeleted`,

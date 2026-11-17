@@ -433,6 +433,20 @@ await photoRef.clearCache();
 await storage.clearCache();
 ```
 
+Nothing is evicted automatically, so a file that's replaced or deleted on the server keeps its copy here until you drop
+it. When documents point at files (`Link.file`), prune their folder after reading them, keeping the paths they still
+reference; give each upload a new file name, and a cached path never goes stale:
+
+```dart
+final themes = await db.collection('users/$uid/themes').get();
+await storage.child('users/$uid/themes').pruneCache(
+  keep: themes.docs.map((d) => (d.data()['logo'] as Link?)?.target).nonNulls,
+);
+```
+
+`pruneCache` works on everything under the folder, at any depth; a file with a queued upload or a download in flight is
+kept. It returns the paths it dropped.
+
 Annotation on `listChildren()` covers the multi-file case while the server is
 reachable. When it is not, `cachedFiles()` answers the same question from disk
 alone:
@@ -732,6 +746,7 @@ configured.
 | `refreshCache()` | Unconditionally re-downloads the current remote version. Requires a store. |
 | `checkForUpdate()` | `Future<CacheStatus>` — `upToDate` / `contentChanged` / `remoteDeleted` / `remoteIncomplete` / `unknown` (offline). **Round-trips**, unlike the other cache methods. Requires a store. |
 | `clearCache()` | Drops this file's cached bytes and catalog row. Requires a store. |
+| `pruneCache(keep:)` | Drops cached copies under this path (any depth) not in `keep`; keeps queued uploads and downloads in flight. Returns the dropped paths. Never contacts the server. Requires a store. |
 | `uploadPath(localPath, {mimeType, metadata, multipartThreshold, enqueue, cache})` | Starts an `UploadTask` from a local file. `enqueue: true` → durable/queued; `cache: true` → also cached locally (stage-first). Each requires its subsystem, else `StateError`. |
 | `uploadBytes(bytes, mimeType, {metadata, multipartThreshold, cache})` | Starts an `UploadTask` from raw bytes. `cache: true` caches it. Not durable — use `uploadPath(enqueue: true)` for that. |
 | `download(saveTo)` | Starts a one-shot `DownloadTask` to the explicit path `saveTo`, with in-session retry. |
